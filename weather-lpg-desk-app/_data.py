@@ -1,24 +1,28 @@
 """Data access layer — LPG Desk Weather Dashboard.
 
-All queries hit dna_snbx_weather.lpg_desk.* (pre-aggregated sandbox tables
-populated by the refresh notebook). App SP has SELECT on the schema.
+Two data patterns are used, matching the Coal Desk dashboard's precedent:
+  - HDD / precipitation / temperature / wind tabs hit pre-aggregated sandbox
+    tables (dna_snbx_weather.lpg_desk.*), populated by lpg_desk_refresh.py.
+  - Gatun Lake and Hurricanes are fetched live and directly (Panama Canal
+    Authority CSVs; NHC + IBTrACS), no sandbox table needed — both sources
+    publish exactly what's needed with no auth and update on their own
+    schedule, so landing a copy in Databricks would just add staleness.
 """
 from __future__ import annotations
 
+import io
 import os
+import re
 from datetime import datetime, timedelta
 
-import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
 
 from _config import (
-    SBX_SCHEMA, HDD_BASE_TEMP, SEASON_START_MONTH, SEASON_START_DAY,
-    HIST_START_YEAR, HIST_END_YEAR,
-    ASIA_CITY_LOCATIONS, ASIA_POPULATION, ASIA_REGION_MAP,
-    PADD_REGIONS, PADD3_COASTAL_CITIES, NAFRICA_WIND_CORRIDOR,
-    GATUN_N_ANALOGS,
+    SBX_SCHEMA,
+    GATUN_HIST_URL, GATUN_PROJECTION_URL, GATUN_ANALOG_YEARS,
+    HURRICANE_BASINS,
 )
 
 # ─── Connection config ────────────────────────────────────────────────────────────
@@ -28,7 +32,7 @@ WAREHOUSE_ID = os.environ.get("DATABRICKS_SQL_WAREHOUSE_HTTP_PATH", "").split("/
 
 
 def _headers() -> dict:
-    """Auth headers using app SP M2M credentials."""
+    """Auth headers using the app SP (AZURE_CLIENT_ID M2M credentials)."""
     from databricks.sdk import WorkspaceClient
     w = WorkspaceClient()
     h = {"Content-Type": "application/json"}
@@ -41,7 +45,7 @@ def _headers() -> dict:
 
 
 def run_query(sql: str) -> pd.DataFrame:
-    """Execute SQL via Statement API and return a DataFrame."""
+    """Execute SQL via the Statement API and return a DataFrame."""
     resp = requests.post(
         f"{DATABRICKS_HOST}/api/2.0/sql/statements/",
         headers=_headers(),
@@ -93,7 +97,7 @@ def load_hdd_normal_daily() -> pd.DataFrame:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_hdd_run_comparison() -> pd.DataFrame:
-    """Daily HDD forecast — latest 3 runs, by PADD."""
+    """Daily HDD forecast — latest 3 model runs, by PADD."""
     sql = f"""
     SELECT model_label, run_ts, run_rank, run_label, padd_region, delivery_date, daily_hdd
     FROM {SBX_SCHEMA}.hdd_run_comparison
@@ -114,7 +118,7 @@ def load_hdd_run_comparison() -> pd.DataFrame:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_asia_hdd_season() -> pd.DataFrame:
-    """Season HDD for Asia regions (Japan, Korea, China N/E/S)."""
+    """Population-weighted season HDD for Asia regions (actual + forecast)."""
     sql = f"""
     SELECT region, model_label, delivery_date, daily_hdd, cumulative_hdd
     FROM {SBX_SCHEMA}.asia_hdd_season
@@ -129,7 +133,7 @@ def load_asia_hdd_season() -> pd.DataFrame:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_asia_hdd_normal() -> pd.DataFrame:
-    """ERA5 climatological daily HDD normal for Asia regions."""
+    """Population-weighted ERA5 climatological daily HDD normal, by region."""
     sql = f"""
     SELECT region, day_of_year, daily_hdd_normal
     FROM {SBX_SCHEMA}.asia_hdd_normal
@@ -147,7 +151,7 @@ def load_asia_hdd_normal() -> pd.DataFrame:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_india_precip_anomaly() -> pd.DataFrame:
-    """India precipitation: actual vs climatology, deviation %."""
+    """India precipitation: actual/forecast vs day-of-year climatology, deviation %."""
     sql = f"""
     SELECT subregion, delivery_date, precip_actual_mm, precip_clim_mm,
            precip_forecast_mm, deviation_pct
@@ -161,54 +165,119 @@ def load_india_precip_anomaly() -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def load_india_precip_map() -> pd.DataFrame:
-    """Gridded India precipitation anomaly for map display."""
-    sql = f"""
-    SELECT latitude, longitude, deviation_pct, period_label
-    FROM {SBX_SCHEMA}.india_precip_map
-    ORDER BY latitude, longitude
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 4: GATUN LAKE — live ACP feed + El Nino analog years
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _drop_level_spikes(df: pd.DataFrame, max_deviation_ft: float = 1.5) -> pd.DataFrame:
+    """Drop isolated 1-2 day transcription spikes from ACP's raw history file.
+
+    Gatun Lake's surface area (~430 km2) makes >1.5 ft/day physically
+    implausible; a handful of such spike-and-revert days exist in the ACP
+    archive (e.g. Dec 1997) and would otherwise dominate an analog-year
+    overlay. Flags points that deviate from a 5-day centered rolling median
+    by more than the threshold — genuine multi-day trends aren't touched
+    since the median isn't swayed by one or two outlier days.
     """
-    df = run_query(sql)
-    df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
-    df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
-    df["deviation_pct"] = pd.to_numeric(df["deviation_pct"], errors="coerce")
-    return df
+    if df.empty:
+        return df
+    med = df['level_ft'].rolling(5, center=True, min_periods=3).median()
+    keep = (df['level_ft'] - med).abs() <= max_deviation_ft
+    return df[keep].reset_index(drop=True)
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 4: GATUN LAKE SEASONAL FORECAST (analog years)
-# ══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_gatun_precip_history() -> pd.DataFrame:
-    """Historical cumulative precipitation over Gatun Lake catchment, by year."""
-    sql = f"""
-    SELECT year, day_of_year, cumulative_precip_mm
-    FROM {SBX_SCHEMA}.gatun_precip_history
-    ORDER BY year, day_of_year
+def load_gatun_lake_levels() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Download Gatun Lake observed levels + official ACP forecast.
+
+    Source: Panama Canal Authority — evtms-rpts.pancanal.com. Returns
+    (hist_df, proj_df), both with columns date (datetime), level_ft (float).
+    hist_df holds the full multi-year record; proj_df holds the official
+    projection published alongside it.
     """
-    df = run_query(sql)
-    df["year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
-    df["day_of_year"] = pd.to_numeric(df["day_of_year"], errors="coerce").astype("Int64")
-    df["cumulative_precip_mm"] = pd.to_numeric(df["cumulative_precip_mm"], errors="coerce")
-    return df
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; LPG-Desk-Dashboard/1.0)"}
+
+    def _fetch(url):
+        r = requests.get(url, headers=headers, timeout=30, verify=False)
+        r.raise_for_status()
+        return r.text
+
+    hist_raw = _fetch(GATUN_HIST_URL)
+    hist_df = pd.read_csv(io.StringIO(hist_raw))
+    hist_df.columns = [c.strip() for c in hist_df.columns]
+    date_col = next((c for c in hist_df.columns if any(k in c.upper() for k in ['DATE', 'FECHA'])), hist_df.columns[0])
+    level_col = next((c for c in hist_df.columns if any(k in c.upper() for k in ['LEVEL', 'FEET', 'NIVEL'])), hist_df.columns[1])
+    hist_df[date_col] = pd.to_datetime(hist_df[date_col], errors='coerce')
+    hist_df[level_col] = pd.to_numeric(hist_df[level_col], errors='coerce')
+    hist_df = (hist_df[[date_col, level_col]].dropna()
+               .rename(columns={date_col: 'date', level_col: 'level_ft'})
+               .query('level_ft > 60')
+               .sort_values('date').reset_index(drop=True))
+    hist_df = _drop_level_spikes(hist_df)
+
+    proj_raw = _fetch(GATUN_PROJECTION_URL)
+    proj_df = None
+    for skip in (2, 1, 0):
+        try:
+            candidate = pd.read_csv(io.StringIO(proj_raw), skiprows=skip)
+            candidate.columns = [c.strip() for c in candidate.columns]
+            if len(candidate) >= 3 and len(candidate.columns) >= 2:
+                proj_df = candidate
+                break
+        except Exception:
+            continue
+
+    if proj_df is not None:
+        date_col = next((c for c in proj_df.columns if 'date' in c.lower()), proj_df.columns[0])
+        level_col = next((c for c in proj_df.columns if any(k in c.lower() for k in ['level', 'water', 'gatun'])), proj_df.columns[1])
+        proj_df[date_col] = pd.to_datetime(proj_df[date_col], errors='coerce')
+        proj_df[level_col] = pd.to_numeric(proj_df[level_col], errors='coerce')
+        proj_df = (proj_df[[date_col, level_col]].dropna()
+                   .rename(columns={date_col: 'date', level_col: 'level_ft'})
+                   .sort_values('date').reset_index(drop=True))
+    else:
+        proj_df = pd.DataFrame(columns=['date', 'level_ft'])
+
+    return hist_df, proj_df
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def load_gatun_analog_forecast() -> pd.DataFrame:
-    """Analog year forecasts for Gatun Lake precipitation (top N similar years)."""
-    sql = f"""
-    SELECT analog_year, similarity_score, day_of_year, cumulative_precip_mm
-    FROM {SBX_SCHEMA}.gatun_analog_forecast
-    ORDER BY similarity_score DESC, day_of_year
+def build_gatun_analog_overlays(hist_df: pd.DataFrame, proj_df: pd.DataFrame,
+                                 analog_years: list[int] = GATUN_ANALOG_YEARS) -> dict[int, pd.DataFrame]:
+    """Time-shift each analog year's observed trajectory onto today's calendar.
+
+    For an analog year Y, pulls Y-1's data starting from today's month/day one
+    year back through the same span covered by hist+forecast, then shifts it
+    forward so that start lands exactly on today — landing all analog curves
+    on the same x-axis as the current observed/forecast window.
     """
-    df = run_query(sql)
-    df["analog_year"] = pd.to_numeric(df["analog_year"], errors="coerce").astype("Int64")
-    df["similarity_score"] = pd.to_numeric(df["similarity_score"], errors="coerce")
-    df["day_of_year"] = pd.to_numeric(df["day_of_year"], errors="coerce").astype("Int64")
-    df["cumulative_precip_mm"] = pd.to_numeric(df["cumulative_precip_mm"], errors="coerce")
-    return df
+    if hist_df.empty:
+        return {}
+
+    window_start = pd.Timestamp.today().normalize() - pd.DateOffset(days=365)
+    forecast_end = proj_df['date'].max() if not proj_df.empty else pd.Timestamp.today()
+    window_end = forecast_end + pd.Timedelta(days=350)
+    window_days = (window_end - window_start).days
+
+    overlays = {}
+    for year in analog_years:
+        start_year = year - 1
+        try:
+            analog_start = window_start.replace(year=start_year)
+        except ValueError:
+            analog_start = window_start.replace(year=start_year, day=28)
+        analog_end = analog_start + pd.Timedelta(days=window_days)
+
+        mask = (hist_df['date'] >= analog_start) & (hist_df['date'] <= analog_end)
+        sub = hist_df.loc[mask].copy()
+        if sub.empty:
+            continue
+        shift = window_start - analog_start
+        sub['display_date'] = sub['date'] + shift
+        overlays[year] = sub[['display_date', 'level_ft']].rename(columns={'display_date': 'date'})
+
+    return overlays
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -217,7 +286,7 @@ def load_gatun_analog_forecast() -> pd.DataFrame:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_padd3_coastal_temps() -> pd.DataFrame:
-    """Temperature actuals + forecast for PADD 3 coastal terminals."""
+    """Temperature actuals + forecast for PADD 3 coastal export terminals."""
     sql = f"""
     SELECT city, delivery_date, source, temperature_c
     FROM {SBX_SCHEMA}.padd3_coastal_temps
@@ -229,55 +298,163 @@ def load_padd3_coastal_temps() -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_padd3_coastal_climatology() -> pd.DataFrame:
-    """Climatological temperature for PADD 3 coastal terminals."""
-    sql = f"""
-    SELECT city, day_of_year, temp_normal_c
-    FROM {SBX_SCHEMA}.padd3_coastal_climatology
-    ORDER BY city, day_of_year
-    """
-    df = run_query(sql)
-    df["day_of_year"] = pd.to_numeric(df["day_of_year"], errors="coerce").astype("Int64")
-    df["temp_normal_c"] = pd.to_numeric(df["temp_normal_c"], errors="coerce")
-    return df
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 6: HURRICANES — live NHC + IBTrACS, scoped to US Gulf/Atlantic + NW Australia
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _kt_to_category(wind_kt) -> str:
+    """Saffir-Simpson / tropical cyclone category from 1-min sustained wind (kt)."""
+    try:
+        w = float(wind_kt)
+    except (TypeError, ValueError):
+        return 'TD'
+    if w < 34:    return 'TD'
+    elif w < 64:  return 'TS'
+    elif w < 83:  return 'Cat 1'
+    elif w < 96:  return 'Cat 2'
+    elif w < 113: return 'Cat 3'
+    elif w < 137: return 'Cat 4'
+    else:         return 'Cat 5'
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 6: HURRICANES
-# ══════════════════════════════════════════════════════════════════════════════
+def _in_bbox(lat: float, lon: float, bbox: dict) -> bool:
+    return bbox["lat_min"] <= lat <= bbox["lat_max"] and bbox["lon_min"] <= lon <= bbox["lon_max"]
+
+
+def _parse_nhc_forecast_positions(text: str) -> list[dict]:
+    """Parse 5-day forecast positions out of an NHC forecast advisory."""
+    pattern = re.compile(
+        r'(INIT|\d+\s*H[RS]?)\s+\d+/\d{4}Z\s+(\d+\.?\d*)\s*([NS])\s+(\d+\.?\d*)\s*([EW])\s+(\d+)\s+KT',
+        re.IGNORECASE,
+    )
+    out = []
+    for m in pattern.finditer(text):
+        step, lat_v, lat_h, lon_v, lon_h, wind = m.groups()
+        step_clean = re.sub(r'[^0-9]', '', step)
+        hours = 0 if step.upper().strip() == 'INIT' else (int(step_clean) if step_clean else 0)
+        lat = float(lat_v) * (1 if lat_h.upper() == 'N' else -1)
+        lon = float(lon_v) * (1 if lon_h.upper() == 'E' else -1)
+        out.append({'hours': hours, 'lat': lat, 'lon': lon, 'wind_kt': int(wind)})
+    return out
+
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def load_hurricane_activity() -> pd.DataFrame:
-    """Current tropical cyclone activity (tracks + wind intensity)."""
-    sql = f"""
-    SELECT basin, storm_name, timestamp, latitude, longitude,
-           max_wind_kt, category, status
-    FROM {SBX_SCHEMA}.hurricane_activity
-    ORDER BY basin, storm_name, timestamp
-    """
-    df = run_query(sql)
-    df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
-    df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
-    df["max_wind_kt"] = pd.to_numeric(df["max_wind_kt"], errors="coerce")
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    return df
+def load_hurricane_data() -> tuple[list[dict], dict[str, str]]:
+    """Fetch active tropical cyclones affecting US Gulf/Atlantic or NW Australia.
 
+    NHC CurrentStorms.json covers the Atlantic; IBTrACS' near-real-time
+    ACTIVE feed is the only source with Southern Hemisphere coverage, used
+    here for NW Australia. Both are public, no auth. Returns (storms, sources).
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_hurricane_season_stats() -> pd.DataFrame:
-    """Season-to-date ACE and storm count by basin."""
-    sql = f"""
-    SELECT basin, season_year, storms_total, hurricanes_total,
-           ace_index, ace_normal, ace_anomaly_pct
-    FROM {SBX_SCHEMA}.hurricane_season_stats
-    ORDER BY basin, season_year
+    verify=False on every request here: some corporate egress paths (proxy
+    TLS inspection) present a self-signed cert for these .gov/.noaa domains,
+    same tradeoff already made for the Gatun Lake ACP fetch above.
     """
-    df = run_query(sql)
-    for c in ["storms_total", "hurricanes_total", "ace_index", "ace_normal", "ace_anomaly_pct"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df["season_year"] = pd.to_numeric(df["season_year"], errors="coerce").astype("Int64")
-    return df
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; LPG-Desk-Dashboard/1.0)"}
+    storms: list[dict] = []
+    sources: dict[str, str] = {}
+
+    us_box = HURRICANE_BASINS["US Gulf & Atlantic"]
+    au_box = HURRICANE_BASINS["NW Australia (Cyclone)"]
+
+    # ── NHC: Atlantic ──────────────────────────────────────────────────────────
+    try:
+        r = requests.get("https://www.nhc.noaa.gov/CurrentStorms.json", headers=headers, timeout=20, verify=False)
+        if r.status_code == 200:
+            n_added = 0
+            for s in r.json().get('activeStorms', []):
+                sid = s.get('id', '')
+                if not sid.startswith('al'):   # Atlantic basin storms only
+                    continue
+                lat, lon = s.get('latitudeNumeric', 0.0), s.get('longitudeNumeric', 0.0)
+                if not _in_bbox(lat, lon, us_box):
+                    continue
+                wind_kt = int(s.get('intensity', 0) or 0)
+                storm = {
+                    'id': sid, 'name': s.get('name', 'Unknown'), 'basin': 'US Gulf & Atlantic',
+                    'lat': lat, 'lon': lon, 'wind_kt': wind_kt,
+                    'pressure_mb': s.get('pressure', 'N/A'),
+                    'category': _kt_to_category(wind_kt),
+                    'classification': s.get('classification', 'TD'),
+                    'last_update': s.get('lastUpdate', ''),
+                    'forecast_track': [],
+                }
+                fcst_url = (s.get('forecastAdvisory') or {}).get('product', '')
+                if fcst_url:
+                    try:
+                        fr = requests.get(fcst_url, headers=headers, timeout=15, verify=False)
+                        if fr.status_code == 200:
+                            storm['forecast_track'] = _parse_nhc_forecast_positions(fr.text)
+                    except Exception:
+                        pass
+                storms.append(storm)
+                n_added += 1
+            sources['NHC (Atlantic)'] = f'ok ({n_added} storm(s) in region)'
+        else:
+            sources['NHC (Atlantic)'] = f'HTTP {r.status_code}'
+    except Exception as e:
+        sources['NHC (Atlantic)'] = str(e)
+
+    # ── IBTrACS ACTIVE: NW Australia (Southern Hemisphere cyclones) ────────────
+    try:
+        ibtracs_url = (
+            "https://www.ncei.noaa.gov/data/international-best-track-archive-for-climate-"
+            "stewardship-ibtracs/v04r00/access/csv/ibtracs.ACTIVE.list.v04r00.csv"
+        )
+        ir = requests.get(ibtracs_url, headers=headers, timeout=30, verify=False)
+        if ir.status_code == 200:
+            df = pd.read_csv(io.StringIO(ir.text), skiprows=[1], low_memory=False)
+            df['ISO_TIME'] = pd.to_datetime(df['ISO_TIME'], errors='coerce')
+            df = df.dropna(subset=['ISO_TIME', 'LAT', 'LON'])
+            if 'TRACK_TYPE' in df.columns:
+                prov = df[df['TRACK_TYPE'].astype(str).str.strip().str.lower() == 'provisional']
+                if not prov.empty:
+                    df = prov
+            latest = df.sort_values('ISO_TIME').groupby('SID').last().reset_index()
+            cutoff = pd.Timestamp(datetime.utcnow() - timedelta(hours=48))
+            latest = latest[latest['ISO_TIME'] >= cutoff]
+
+            n_added = 0
+            for _, row in latest.iterrows():
+                try:
+                    lat, lon = float(row['LAT']), float(row['LON'])
+                except (ValueError, TypeError):
+                    continue
+                if abs(lat) > 90 or abs(lon) > 180 or not _in_bbox(lat, lon, au_box):
+                    continue
+                name = str(row.get('NAME', '')).strip()
+                if not name or name.upper() in ('UNNAMED', 'NOT_NAMED', 'NAN'):
+                    name = f"TC-{row.get('SID', '?')}"
+                wind_kt = 0
+                for wcol in ('WMO_WIND', 'USA_WIND'):
+                    raw = str(row.get(wcol, '')).strip()
+                    if raw and raw.lower() != 'nan':
+                        wind_kt = int(float(raw))
+                        break
+                pressure = 'N/A'
+                for pcol in ('WMO_PRES', 'USA_PRES'):
+                    raw = str(row.get(pcol, '')).strip()
+                    if raw and raw.lower() != 'nan':
+                        pressure = raw
+                        break
+                storms.append({
+                    'id': str(row.get('SID', name)), 'name': name.capitalize(),
+                    'basin': 'NW Australia (Cyclone)', 'lat': lat, 'lon': lon, 'wind_kt': wind_kt,
+                    'pressure_mb': pressure, 'category': _kt_to_category(wind_kt),
+                    'classification': 'TY' if wind_kt >= 64 else ('TS' if wind_kt >= 34 else 'TD'),
+                    'last_update': str(row['ISO_TIME'])[:16], 'forecast_track': [],
+                })
+                n_added += 1
+            sources['IBTrACS (NW Australia)'] = f'ok ({n_added} storm(s) in region)'
+        else:
+            sources['IBTrACS (NW Australia)'] = f'HTTP {ir.status_code}'
+    except Exception as e:
+        sources['IBTrACS (NW Australia)'] = str(e)
+
+    return storms, sources
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -286,7 +463,7 @@ def load_hurricane_season_stats() -> pd.DataFrame:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_nafrica_wind() -> pd.DataFrame:
-    """Wind speeds (actual + forecast) at North Africa corridor points."""
+    """Wind speeds (actual + forecast) at North Africa corridor ports."""
     sql = f"""
     SELECT city, delivery_date, source, wind_speed_ms
     FROM {SBX_SCHEMA}.nafrica_wind
@@ -295,30 +472,4 @@ def load_nafrica_wind() -> pd.DataFrame:
     df = run_query(sql)
     df["wind_speed_ms"] = pd.to_numeric(df["wind_speed_ms"], errors="coerce")
     df["delivery_date"] = pd.to_datetime(df["delivery_date"], errors="coerce")
-    return df
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_nafrica_wind_climatology() -> pd.DataFrame:
-    """Climatological wind speed for North Africa corridor."""
-    sql = f"""
-    SELECT city, day_of_year, wind_speed_normal_ms
-    FROM {SBX_SCHEMA}.nafrica_wind_climatology
-    ORDER BY city, day_of_year
-    """
-    df = run_query(sql)
-    df["day_of_year"] = pd.to_numeric(df["day_of_year"], errors="coerce").astype("Int64")
-    df["wind_speed_normal_ms"] = pd.to_numeric(df["wind_speed_normal_ms"], errors="coerce")
-    return df
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# HELPERS
-# ══════════════════════════════════════════════════════════════════════════════
-
-def compute_cumulative_hdd(df: pd.DataFrame, date_col: str = "delivery_date",
-                          hdd_col: str = "daily_hdd") -> pd.DataFrame:
-    """Add cumulative_hdd column within each season (Oct 1 – Mar 31)."""
-    df = df.sort_values(date_col).copy()
-    df["cumulative_hdd"] = df[hdd_col].cumsum()
     return df
