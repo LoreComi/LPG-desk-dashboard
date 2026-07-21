@@ -1,6 +1,6 @@
 """LPG Desk Weather Dashboard — Trader Edition
 
-Sections (picked from the sidebar):
+Tabs:
   1. US HDD by PADD        — Cumulative HDD + run comparison
   2. Asia HDD              — Japan, South Korea, China (N/E/S)
   3. India Precipitation   — Anomaly vs climatology
@@ -37,6 +37,7 @@ from _data import (
     load_hurricane_data,
     load_nafrica_wind,
 )
+from _ai_lpg_brief import generate_lpg_brief, brief_to_html_bullets
 from _charts import (
     make_hdd_season_chart, make_hdd_comparison_chart,
     make_asia_hdd_season_chart, make_asia_hdd_bar_chart,
@@ -51,8 +52,9 @@ from _style import CUSTOM_CSS
 
 st.set_page_config(
     page_title="LPG Desk — Weather Dashboard",
+    page_icon="⛽",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
@@ -82,13 +84,9 @@ def raw_kpi_card(label: str, value_str: str, card_class: str = "kpi-card-neutral
     return f'<div class="kpi-card {card_class}"><div class="kpi-label">{label}</div><div class="kpi-value">{value_str}</div></div>'
 
 
-_STATUS_TAGS = {"critical": "Alert", "warning": "Notice", "good": "OK"}
-
-
-def status_banner(text: str, level: str = "warning") -> str:
-    """Alert banner — bold text tag + label, never color alone (status tokens are reserved)."""
-    tag = _STATUS_TAGS.get(level, "Notice")
-    return f'<div class="status-banner status-banner-{level}"><span class="status-tag">{tag}</span>{text}</div>'
+def status_banner(icon: str, text: str, level: str = "warning") -> str:
+    """Alert banner — icon + label, never color alone (status tokens are reserved)."""
+    return f'<div class="status-banner status-banner-{level}">{icon} {text}</div>'
 
 
 def _ordinal(n: int) -> str:
@@ -158,7 +156,7 @@ def render_us_hdd():
         as_of = next((k["as_of"] for k in padd_kpis.values() if k), None)
         label = hdd_season_label(hdd_season_start_year(as_of)) if as_of is not None else "last winter"
         st.markdown(
-            status_banner(f"Not in HDD seasonality — showing final values for {label} below.", "warning"),
+            status_banner("📅", f"Not in HDD seasonality — showing final values for {label} below.", "warning"),
             unsafe_allow_html=True,
         )
 
@@ -215,7 +213,7 @@ def render_asia_hdd():
         as_of = next((k["as_of"] for k in region_kpis.values() if k), None)
         label = hdd_season_label(hdd_season_start_year(as_of)) if as_of is not None else "last winter"
         st.markdown(
-            status_banner(f"Not in HDD seasonality — showing final values for {label} below.", "warning"),
+            status_banner("📅", f"Not in HDD seasonality — showing final values for {label} below.", "warning"),
             unsafe_allow_html=True,
         )
 
@@ -266,7 +264,7 @@ def render_india_precip():
     # Note when deviation is unavailable
     if anom_df["deviation_pct"].isna().all():
         st.markdown(
-            status_banner("Anomaly % unavailable — climatology baseline still building (< 1 year of ERA5 history).", "warning"),
+            status_banner("📊", "Anomaly % unavailable — climatology baseline still building (< 1 year of ERA5 history).", "warning"),
             unsafe_allow_html=True,
         )
 
@@ -343,8 +341,8 @@ def render_padd3_coastal():
     if not freeze_days.empty:
         cities_at_risk = freeze_days["city"].unique().tolist()
         st.markdown(
-            status_banner(f"{len(cities_at_risk)} terminal(s) forecast below "
-                          f"{FREEZE_THRESHOLD_C:.0f}°C: {', '.join(cities_at_risk)}", "critical"),
+            status_banner("❄", f"FREEZE ALERT: {len(cities_at_risk)} terminal(s) forecast below "
+                                f"{FREEZE_THRESHOLD_C:.0f}°C — {', '.join(cities_at_risk)}", "critical"),
             unsafe_allow_html=True,
         )
 
@@ -386,17 +384,17 @@ def render_hurricanes():
             st.plotly_chart(fig, use_container_width=True)
 
     if not storms:
-        st.markdown(status_banner("No active tropical cyclones in the US Gulf/Atlantic or "
-                                   "NW Australia region at this time.", "good"), unsafe_allow_html=True)
+        st.markdown(status_banner("✓", "No active tropical cyclones in the US Gulf/Atlantic or "
+                                        "NW Australia region at this time.", "good"), unsafe_allow_html=True)
         return
 
     max_wind = max(s["wind_kt"] for s in storms)
     if max_wind >= 64:
-        st.markdown(status_banner(f"{len(storms)} active storm(s) tracked — strongest at "
-                                   f"{max_wind} kt.", "critical"), unsafe_allow_html=True)
+        st.markdown(status_banner("🌀", f"{len(storms)} active storm(s) tracked — strongest at "
+                                        f"{max_wind} kt.", "critical"), unsafe_allow_html=True)
     else:
-        st.markdown(status_banner(f"{len(storms)} active storm(s) tracked — strongest at "
-                                   f"{max_wind} kt.", "warning"), unsafe_allow_html=True)
+        st.markdown(status_banner("🌀", f"{len(storms)} active storm(s) tracked — strongest at "
+                                        f"{max_wind} kt.", "warning"), unsafe_allow_html=True)
 
     st.divider()
     st.markdown("##### ACTIVE STORMS")
@@ -435,8 +433,8 @@ def render_nafrica_wind():
         cities_gale = gale_events["city"].unique().tolist()
         max_pct = int(gale_events.groupby("city")["pct_above_gale"].max().max())
         st.markdown(
-            status_banner(f"{', '.join(cities_gale)} — up to {max_pct}% of members "
-                          f"forecast ≥{WIND_GALE_MS:.0f} m/s in the next 14 days", "critical"),
+            status_banner("💨", f"GALE RISK: {', '.join(cities_gale)} — up to {max_pct}% of members "
+                                f"forecast ≥{WIND_GALE_MS:.0f} m/s in the next 14 days", "critical"),
             unsafe_allow_html=True,
         )
 
@@ -460,6 +458,516 @@ def render_nafrica_wind():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# TAB 0: AI LPG MARKET BRIEF
+# ══════════════════════════════════════════════════════════════════════════════
+
+_BRIEF_CSS = """
+<style>
+.brief-box {
+    background: var(--bg-elevated, #1c1f28);
+    border: 1px solid var(--border-bright, rgba(255,255,255,0.12));
+    border-radius: var(--radius-lg, 14px);
+    padding: 20px 24px;
+    margin: 12px 0;
+}
+.brief-bullet {
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+    font-size: 0.92rem;
+    line-height: 1.5;
+    color: var(--text-primary, #e8eaed);
+}
+.brief-bullet:last-child { border-bottom: none; }
+.brief-bullet b { color: var(--accent, #4d9ff7); }
+.signal-card {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+}
+.signal-bullish { background: rgba(52,211,153,0.12); color: #34d399; border: 1px solid rgba(52,211,153,0.3); }
+.signal-bearish { background: rgba(248,113,113,0.12); color: #f87171; border: 1px solid rgba(248,113,113,0.3); }
+.signal-neutral { background: rgba(156,163,175,0.12); color: #9ca3af; border: 1px solid rgba(156,163,175,0.3); }
+</style>
+"""
+
+
+def _get_az_credentials() -> tuple[str, str, str]:
+    """Retrieve Azure OpenAI credentials from Databricks secrets or env vars."""
+    import os
+    # Try environment variables first (set via app.yaml env or secrets)
+    tenant = os.environ.get("AZURE_TENANT_ID", "")
+    client = os.environ.get("AZURE_CLIENT_ID", "")
+    secret = os.environ.get("AZURE_CLIENT_SECRET", "")
+    if all([tenant, client, secret]):
+        return tenant, client, secret
+
+    # Try Databricks secrets
+    try:
+        from databricks.sdk import WorkspaceClient
+        w = WorkspaceClient()
+        scope = "commodity-news-secrets"
+        tenant = w.dbutils.secrets.get(scope=scope, key="azure_tenant_id")
+        client = w.dbutils.secrets.get(scope=scope, key="azure_client_id")
+        secret = w.dbutils.secrets.get(scope=scope, key="azure_client_secret")
+        return tenant, client, secret
+    except Exception:
+        pass
+
+    return "", "", ""
+
+
+def _render_signal_pill(label: str, signal: str):
+    cls = f"signal-{signal.lower()}"
+    arrow = "▲" if signal == "BULLISH" else ("▼" if signal == "BEARISH" else "●")
+    return f'<span class="signal-card {cls}">{arrow} {label}: {signal}</span>'
+
+
+def render_lpg_brief():
+    st.markdown("#### AI LPG MARKET BRIEF")
+    st.caption(
+        "6-agent AI analysis: storm supply risk · US propane demand · "
+        "Asia LPG demand · India monsoon logistics · Panama Canal transit → LPG market outlook"
+    )
+    st.markdown(_BRIEF_CSS, unsafe_allow_html=True)
+
+    tenant_id, client_id, client_secret = _get_az_credentials()
+    if not all([tenant_id, client_id, client_secret]):
+        st.warning(
+            "Azure OpenAI credentials not found. "
+            "Configure `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` "
+            "in environment variables or Databricks secrets (scope: **commodity-news-secrets**)."
+        )
+        return
+
+    col_txt, col_btn = st.columns([5, 1])
+    with col_btn:
+        generate = st.button("Generate", type="primary", key="lpg_brief_btn")
+
+    cached = st.session_state.get("lpg_brief_result")
+
+    if not generate and not cached:
+        st.info(
+            "Click **Generate** to run the 6-agent AI analysis. "
+            "Each run makes 6 Azure OpenAI calls (~20-30 seconds)."
+        )
+        with st.expander("What each agent analyses"):
+            st.markdown("""
+| Agent | Data source | Market signal |
+|---|---|---|
+| Hurricane | NHC + JTWC live storms | PADD 3 terminal disruption → Mont Belvieu |
+| US HDD | ERA5 + EC-ens by PADD | Propane heating demand → stock draws |
+| Asia HDD | Population-weighted Japan/Korea/China | NE Asia LPG imports → FEI |
+| India Monsoon | ERA5 + EC-ens precipitation | Port congestion → India CFR premium |
+| Panama Canal | Gatun Lake live level | VLGC transit constraints → freight/ARB |
+| Synthesis | All 5 agents combined | Net LPG market direction |
+""")
+        return
+
+    if generate:
+        progress = st.empty()
+
+        def _prog(msg: str):
+            progress.caption(f"⟳  {msg}")
+
+        try:
+            # Gather data from existing dashboard loaders
+            _prog("Loading storm data…")
+            storms_result = load_hurricane_data()
+            storms, _ = storms_result if isinstance(storms_result, tuple) else (storms_result, {})
+
+            _prog("Computing US HDD KPIs…")
+            padd_kpis = {}
+            try:
+                season_df = load_hdd_season()
+                normal_df = load_hdd_normal_daily()
+                history_df = load_hdd_season_history()
+                for padd in PADD_REGIONS:
+                    padd_kpis[padd] = compute_season_kpis(
+                        season_df, normal_df, history_df, "padd_region", padd)
+            except Exception:
+                pass
+
+            _prog("Computing Asia HDD KPIs…")
+            asia_kpis = {}
+            try:
+                asia_season = load_asia_hdd_season()
+                asia_normal = load_asia_hdd_normal()
+                asia_history = load_asia_hdd_season_history()
+                for region in ASIA_REGION_MAP:
+                    asia_kpis[region] = compute_season_kpis(
+                        asia_season, asia_normal, asia_history, "region", region)
+            except Exception:
+                pass
+
+            _prog("Loading India precipitation…")
+            india_summary = {}
+            try:
+                anom_df = load_india_precip_anomaly()
+                if not anom_df.empty:
+                    actuals = anom_df[anom_df["precip_actual_mm"].notna()]
+                    for sub in actuals["subregion"].unique():
+                        sdf = actuals[actuals["subregion"] == sub]
+                        india_summary[sub] = {
+                            "avg_actual_mm": float(sdf["precip_actual_mm"].mean()),
+                            "avg_clim_mm": float(sdf["precip_clim_mm"].mean()) if sdf["precip_clim_mm"].notna().any() else None,
+                            "avg_deviation_pct": float(sdf["deviation_pct"].mean()) if sdf["deviation_pct"].notna().any() else None,
+                        }
+            except Exception:
+                pass
+
+            _prog("Loading Gatun Lake level…")
+            gatun_level = None
+            gatun_trend = ""
+            try:
+                hist_df, _ = load_gatun_lake_levels()
+                if not hist_df.empty:
+                    recent = hist_df.sort_values("date").tail(14)
+                    gatun_level = float(recent["level_ft"].iloc[-1])
+                    if len(recent) >= 7:
+                        week_ago = float(recent["level_ft"].iloc[-7])
+                        delta = gatun_level - week_ago
+                        gatun_trend = f"{'rising' if delta > 0 else 'falling'} {abs(delta):.1f} ft over last 7 days"
+            except Exception:
+                pass
+
+            result = generate_lpg_brief(
+                storms=storms,
+                padd_kpis=padd_kpis,
+                asia_kpis=asia_kpis,
+                india_precip_summary=india_summary,
+                gatun_level_ft=gatun_level,
+                gatun_trend=gatun_trend,
+                azure_tenant_id=tenant_id,
+                azure_client_id=client_id,
+                azure_client_secret=client_secret,
+                progress_cb=_prog,
+            )
+            st.session_state["lpg_brief_result"] = result
+            cached = result
+
+        except Exception as exc:
+            progress.empty()
+            st.error(f"Brief generation failed: {exc}")
+            with st.expander("Error details"):
+                st.code(tb.format_exc())
+            return
+
+        progress.empty()
+
+    if not cached:
+        return
+
+    # ── Agent signal pills ─────────────────────────────────────────────────────
+    signals = cached.get("signals", {})
+    pills = " &nbsp; ".join([
+        _render_signal_pill("Storms", signals.get("hurricane", "NEUTRAL")),
+        _render_signal_pill("US HDD", signals.get("us_hdd", "NEUTRAL")),
+        _render_signal_pill("Asia HDD", signals.get("asia_hdd", "NEUTRAL")),
+        _render_signal_pill("India", signals.get("india_precip", "NEUTRAL")),
+        _render_signal_pill("Panama", signals.get("panama_canal", "NEUTRAL")),
+    ])
+    overall = signals.get("synthesis", "NEUTRAL")
+    overall_pill = _render_signal_pill("NET", overall)
+    st.markdown(f"{pills} &nbsp;&nbsp; {overall_pill}", unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # ── Synthesis brief ───────────────────────────────────────────────────────
+    gatun_str = (f" · Gatun {cached['gatun_level_ft']:.1f} ft"
+                 if cached.get("gatun_level_ft") else "")
+    st.markdown(f"**LPG Market Brief**{gatun_str} · {cached['generated_at']}")
+    st.markdown(
+        f'<div class="brief-box">{brief_to_html_bullets(cached["synthesis"])}</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("---")
+    st.markdown("##### SPECIALIST AGENT OUTPUTS")
+    c1, c2 = st.columns(2)
+    with c1:
+        with st.expander("Hurricane / terminal supply risk"):
+            st.markdown(cached["hurricane"])
+        with st.expander("US HDD / propane heating demand"):
+            st.markdown(cached["us_hdd"])
+        with st.expander("India monsoon / LPG logistics"):
+            st.markdown(cached["india_precip"])
+    with c2:
+        with st.expander("Asia HDD / LPG import demand"):
+            st.markdown(cached["asia_hdd"])
+        gatun_exp = (f"Panama Canal — {cached['gatun_level_ft']:.1f} ft"
+                     if cached.get("gatun_level_ft") else "Panama Canal")
+        with st.expander(gatun_exp):
+            st.markdown(cached["panama_canal"])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 0: AI LPG MARKET BRIEF
+# ══════════════════════════════════════════════════════════════════════════════
+
+_BRIEF_CSS = """
+<style>
+.brief-box {
+    background: var(--bg-elevated, #1c1f28);
+    border: 1px solid var(--border-bright, rgba(255,255,255,0.12));
+    border-radius: var(--radius-lg, 14px);
+    padding: 20px 24px;
+    margin: 12px 0;
+}
+.brief-bullet {
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+    font-size: 0.92rem;
+    line-height: 1.5;
+    color: var(--text-primary, #e8eaed);
+}
+.brief-bullet:last-child { border-bottom: none; }
+.brief-bullet b { color: var(--accent, #4d9ff7); }
+.signal-card {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+}
+.signal-bullish { background: rgba(52,211,153,0.12); color: #34d399; border: 1px solid rgba(52,211,153,0.3); }
+.signal-bearish { background: rgba(248,113,113,0.12); color: #f87171; border: 1px solid rgba(248,113,113,0.3); }
+.signal-neutral { background: rgba(156,163,175,0.12); color: #9ca3af; border: 1px solid rgba(156,163,175,0.3); }
+</style>
+"""
+
+
+def _get_az_credentials() -> tuple:
+    """Retrieve Azure OpenAI credentials — same pattern as Coal Desk app."""
+    import os
+
+    # 1. Try environment variables (app.yaml valueFrom)
+    tenant = os.environ.get("AZURE_TENANT_ID", "")
+    client = os.environ.get("AZURE_CLIENT_ID", "")
+    secret = os.environ.get("AZURE_CLIENT_SECRET", "")
+    if all([tenant, client, secret]):
+        return tenant, client, secret
+
+    # 2. Databricks SDK dbutils (works in Apps runtime context)
+    try:
+        from databricks.sdk.runtime import dbutils as sdk_dbutils
+        tenant = sdk_dbutils.secrets.get("commodity-news-secrets", "azure-tenant-id")
+        client = sdk_dbutils.secrets.get("commodity-news-secrets", "azure-client-id")
+        secret = sdk_dbutils.secrets.get("commodity-news-secrets", "azure-client-secret")
+        if all([tenant, client, secret]):
+            return tenant, client, secret
+    except Exception:
+        pass
+
+    # 3. WorkspaceClient secrets API
+    try:
+        from databricks.sdk import WorkspaceClient
+        w = WorkspaceClient()
+        tenant = w.dbutils.secrets.get(scope="commodity-news-secrets", key="azure-tenant-id")
+        client = w.dbutils.secrets.get(scope="commodity-news-secrets", key="azure-client-id")
+        secret = w.dbutils.secrets.get(scope="commodity-news-secrets", key="azure-client-secret")
+        if all([tenant, client, secret]):
+            return tenant, client, secret
+    except Exception:
+        pass
+
+    return "", "", ""
+
+
+def _render_signal_pill(label: str, signal: str) -> str:
+    cls = f"signal-{signal.lower()}"
+    arrow = "▲" if signal == "BULLISH" else ("▼" if signal == "BEARISH" else "●")
+    return f'<span class="signal-card {cls}">{arrow} {label}: {signal}</span>'
+
+
+def render_lpg_brief():
+    st.markdown("#### AI LPG MARKET BRIEF")
+    st.caption(
+        "6-agent AI analysis: storm supply risk · US propane demand · "
+        "Asia LPG demand · India monsoon logistics · Panama Canal transit → LPG market outlook"
+    )
+    st.markdown(_BRIEF_CSS, unsafe_allow_html=True)
+
+    tenant_id, client_id, client_secret = _get_az_credentials()
+    if not all([tenant_id, client_id, client_secret]):
+        st.warning(
+            "Azure OpenAI credentials not found. "
+            "Configure `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` "
+            "in environment variables or Databricks secrets (scope: **commodity-news-secrets**)."
+        )
+        return
+
+    col_txt, col_btn = st.columns([5, 1])
+    with col_btn:
+        generate = st.button("Generate", type="primary", key="lpg_brief_btn")
+
+    cached = st.session_state.get("lpg_brief_result")
+
+    if not generate and not cached:
+        st.info(
+            "Click **Generate** to run the 6-agent AI analysis. "
+            "Each run makes 6 Azure OpenAI calls (~20-30 seconds)."
+        )
+        with st.expander("What each agent analyses"):
+            st.markdown("""
+| Agent | Data source | Market signal |
+|---|---|---|
+| Hurricane | NHC + JTWC live storms | PADD 3 terminal disruption → Mont Belvieu |
+| US HDD | ERA5 + EC-ens by PADD | Propane heating demand → stock draws |
+| Asia HDD | Population-weighted Japan/Korea/China | NE Asia LPG imports → FEI |
+| India Monsoon | ERA5 + EC-ens precipitation | Port congestion → India CFR premium |
+| Panama Canal | Gatun Lake live level | VLGC transit constraints → freight/ARB |
+| Synthesis | All 5 agents combined | Net LPG market direction |
+""")
+        return
+
+    if generate:
+        progress = st.empty()
+
+        def _prog(msg: str):
+            progress.caption(f"⟳  {msg}")
+
+        try:
+            _prog("Loading storm data…")
+            storms_result = load_hurricane_data()
+            storms, _ = storms_result if isinstance(storms_result, tuple) else (storms_result, {})
+
+            _prog("Computing US HDD KPIs…")
+            padd_kpis = {}
+            try:
+                season_df = load_hdd_season()
+                normal_df = load_hdd_normal_daily()
+                history_df = load_hdd_season_history()
+                for padd in PADD_REGIONS:
+                    padd_kpis[padd] = compute_season_kpis(
+                        season_df, normal_df, history_df, "padd_region", padd)
+            except Exception:
+                pass
+
+            _prog("Computing Asia HDD KPIs…")
+            asia_kpis = {}
+            try:
+                asia_season = load_asia_hdd_season()
+                asia_normal = load_asia_hdd_normal()
+                asia_history = load_asia_hdd_season_history()
+                for region in ASIA_REGION_MAP:
+                    asia_kpis[region] = compute_season_kpis(
+                        asia_season, asia_normal, asia_history, "region", region)
+            except Exception:
+                pass
+
+            _prog("Loading India precipitation…")
+            india_summary = {}
+            try:
+                anom_df = load_india_precip_anomaly()
+                if not anom_df.empty:
+                    actuals = anom_df[anom_df["precip_actual_mm"].notna()]
+                    for sub in actuals["subregion"].unique():
+                        sdf = actuals[actuals["subregion"] == sub]
+                        india_summary[sub] = {
+                            "avg_actual_mm": float(sdf["precip_actual_mm"].mean()),
+                            "avg_clim_mm": float(sdf["precip_clim_mm"].mean()) if sdf["precip_clim_mm"].notna().any() else None,
+                            "avg_deviation_pct": float(sdf["deviation_pct"].mean()) if sdf["deviation_pct"].notna().any() else None,
+                        }
+            except Exception:
+                pass
+
+            _prog("Loading Gatun Lake level…")
+            gatun_level = None
+            gatun_trend = ""
+            try:
+                hist_df, _ = load_gatun_lake_levels()
+                if not hist_df.empty:
+                    recent = hist_df.sort_values("date").tail(14)
+                    gatun_level = float(recent["level_ft"].iloc[-1])
+                    if len(recent) >= 7:
+                        week_ago = float(recent["level_ft"].iloc[-7])
+                        delta = gatun_level - week_ago
+                        gatun_trend = f"{'rising' if delta > 0 else 'falling'} {abs(delta):.1f} ft over last 7 days"
+            except Exception:
+                pass
+
+            result = generate_lpg_brief(
+                storms=storms,
+                padd_kpis=padd_kpis,
+                asia_kpis=asia_kpis,
+                india_precip_summary=india_summary,
+                gatun_level_ft=gatun_level,
+                gatun_trend=gatun_trend,
+                azure_tenant_id=tenant_id,
+                azure_client_id=client_id,
+                azure_client_secret=client_secret,
+                progress_cb=_prog,
+            )
+            st.session_state["lpg_brief_result"] = result
+            cached = result
+
+        except Exception as exc:
+            progress.empty()
+            st.error(f"Brief generation failed: {exc}")
+            import traceback
+            with st.expander("Error details"):
+                st.code(traceback.format_exc())
+            return
+
+        progress.empty()
+
+    if not cached:
+        return
+
+    # Agent signal pills
+    signals = cached.get("signals", {})
+    pills = " &nbsp; ".join([
+        _render_signal_pill("Storms", signals.get("hurricane", "NEUTRAL")),
+        _render_signal_pill("US HDD", signals.get("us_hdd", "NEUTRAL")),
+        _render_signal_pill("Asia HDD", signals.get("asia_hdd", "NEUTRAL")),
+        _render_signal_pill("India", signals.get("india_precip", "NEUTRAL")),
+        _render_signal_pill("Panama", signals.get("panama_canal", "NEUTRAL")),
+    ])
+    overall = signals.get("synthesis", "NEUTRAL")
+    overall_pill = _render_signal_pill("NET", overall)
+    st.markdown(f"{pills} &nbsp;&nbsp; {overall_pill}", unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # Synthesis brief
+    gatun_str = (f" · Gatun {cached['gatun_level_ft']:.1f} ft"
+                 if cached.get("gatun_level_ft") else "")
+    st.markdown(f"**LPG Market Brief**{gatun_str} · {cached['generated_at']}")
+    st.markdown(
+        f'<div class="brief-box">{brief_to_html_bullets(cached["synthesis"])}</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("---")
+    st.markdown("##### SPECIALIST AGENT OUTPUTS")
+    c1, c2 = st.columns(2)
+    with c1:
+        with st.expander("Hurricane / terminal supply risk"):
+            st.markdown(cached["hurricane"])
+        with st.expander("US HDD / propane heating demand"):
+            st.markdown(cached["us_hdd"])
+        with st.expander("India monsoon / LPG logistics"):
+            st.markdown(cached["india_precip"])
+    with c2:
+        with st.expander("Asia HDD / LPG import demand"):
+            st.markdown(cached["asia_hdd"])
+        gatun_exp = (f"Panama Canal — {cached['gatun_level_ft']:.1f} ft"
+                     if cached.get("gatun_level_ft") else "Panama Canal")
+        with st.expander(gatun_exp):
+            st.markdown(cached["panama_canal"])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MAIN LAYOUT
 # ══════════════════════════════════════════════════════════════════════════════
 from datetime import datetime, timezone
@@ -468,7 +976,7 @@ _now_utc = datetime.now(timezone.utc)
 _refresh_hour = _now_utc.strftime("%H:%M UTC")
 _refresh_date = _now_utc.strftime("%d %b %Y")
 
-# Branded header
+# Professional branded header
 st.markdown(f"""
 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;">
     <div>
@@ -479,10 +987,10 @@ st.markdown(f"""
     </div>
     <div style="display:flex; align-items:center; gap:12px;">
         <span style="display:inline-flex; align-items:center; gap:6px; padding:4px 12px;
-            background:#e9f7e9; border:1px solid rgba(12,163,12,0.28);
-            border-radius:999px; font-size:0.72rem; font-weight:600; color:#0f5c0f;">
-            <span style="width:6px;height:6px;background:#0ca30c;border-radius:50%;display:inline-block;"></span>
-            Live
+            background:rgba(52,211,153,0.1); border:1px solid rgba(52,211,153,0.25);
+            border-radius:999px; font-size:0.72rem; font-weight:600; color:#34d399;">
+            <span style="width:6px;height:6px;background:#34d399;border-radius:50%;display:inline-block;"></span>
+            LIVE
         </span>
         <span style="font-size:0.72rem; color:var(--text-muted); font-family:'JetBrains Mono',monospace;">
             {_refresh_date} &middot; {_refresh_hour}
@@ -491,20 +999,30 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-PAGES = {
-    "US HDD": render_us_hdd,
-    "Asia HDD": render_asia_hdd,
-    "India Precipitation": render_india_precip,
-    "Gatun Lake": render_gatun_lake,
-    "PADD 3 Coastal": render_padd3_coastal,
-    "Hurricanes": render_hurricanes,
-    "N. Africa Wind": render_nafrica_wind,
-}
+tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    "AI Brief",
+    "US HDD",
+    "Asia HDD",
+    "India Precip",
+    "Gatun Lake",
+    "PADD 3 Coastal",
+    "Hurricanes",
+    "N.Africa Wind",
+])
 
-with st.sidebar:
-    st.markdown("### Sections")
-    selected_page = st.radio(
-        "Sections", list(PAGES.keys()), label_visibility="collapsed", key="nav_page",
-    )
-
-PAGES[selected_page]()
+with tab0:
+    render_lpg_brief()
+with tab1:
+    render_us_hdd()
+with tab2:
+    render_asia_hdd()
+with tab3:
+    render_india_precip()
+with tab4:
+    render_gatun_lake()
+with tab5:
+    render_padd3_coastal()
+with tab6:
+    render_hurricanes()
+with tab7:
+    render_nafrica_wind()

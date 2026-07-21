@@ -443,8 +443,8 @@ forecasts AS (
 clim_daily AS (
   SELECT {INDIA_CASE} AS subregion, DAYOFYEAR(delivery_start) AS doy, DATE(delivery_start) AS dt, AVG(value) AS precip_mm
   FROM dna_prod_silver.meteomatics.precipitation
-  WHERE curve_name = 'precip_24h_mm_ecmwf_era5_p1d' AND model = 'ecmwf-era5'
-    AND delivery_start < CURRENT_DATE() - INTERVAL 120 DAYS
+  WHERE curve_name = 'precip_24h_mm_mix_p1d' AND model = 'mix'
+    AND YEAR(delivery_start) BETWEEN 2000 AND 2024
     AND latitude BETWEEN 8 AND 35 AND longitude BETWEEN 68 AND 90
   GROUP BY {INDIA_CASE}, DAYOFYEAR(delivery_start), DATE(delivery_start)
   HAVING subregion IS NOT NULL
