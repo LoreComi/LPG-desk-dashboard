@@ -125,7 +125,16 @@ def hdd_kpi_card(label: str, kpis: dict | None) -> str:
     rank_html = ""
     rank, pool = kpis.get("rank"), kpis.get("rank_pool_size")
     if rank and pool:
-        rank_html = f'<div class="kpi-rank">{_ordinal(rank)} coldest of last {pool} yrs</div>'
+        # rank counts this season plus the `pool` history years (1 = coldest of
+        # all of them, up to pool+1 = mildest of all of them). Whichever end
+        # it's closer to reads more naturally — e.g. "1st mildest" instead of
+        # the technically-equivalent but confusing "(pool+1)th coldest".
+        total = pool + 1
+        if rank <= total - rank + 1:
+            rank_html = f'<div class="kpi-rank">{_ordinal(rank)} coldest of last {pool} yrs</div>'
+        else:
+            mild_rank = total - rank + 1
+            rank_html = f'<div class="kpi-rank">{_ordinal(mild_rank)} mildest of last {pool} yrs</div>'
 
     return (f'<div class="kpi-card {card_class}"><div class="kpi-label">{label}</div>'
             f'<div class="kpi-value">{value_str}</div>{delta_html}{rank_html}</div>')
