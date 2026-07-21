@@ -46,15 +46,15 @@ TABLE_TEMP_ACTUALS = "dna_prod_silver.meteomatics.temperature"
 TABLE_TEMP_FORECAST = "dna_prod_silver.meteomatics.temperature_forecast"
 TABLE_PRECIP_ACTUALS = "dna_prod_silver.meteomatics.precipitation"
 TABLE_PRECIP_FORECAST = "dna_prod_silver.meteomatics.precipitation_forecast"
-TABLE_WIND_ACTUALS = "dna_prod_silver.meteomatics.wind"
-TABLE_WIND_FORECAST = "dna_prod_silver.meteomatics.wind_forecast"
+TABLE_WIND_ACTUALS = "dna_prod_silver.meteomatics.wind_speed"          # no 10m ERA5 surface wind available
+TABLE_WIND_FORECAST = "dna_prod_silver.meteomatics.wind_speed_forecast"
 
 CURVE_TEMP_HIST = "t_mean_2m_24h_c_ecmwf_era5_p1d"
 CURVE_TEMP_FCST = "t_mean_2m_24h_c_ecmwf_ens_p1d"
 CURVE_PRECIP_HIST = "precip_24h_mm_ecmwf_era5_p1d"
 CURVE_PRECIP_FCST = "precip_24h_mm_ecmwf_ens_p1d"
-CURVE_WIND_HIST = "wind_speed_10m_ms_ecmwf_era5_p1d"
-CURVE_WIND_FCST = "wind_speed_10m_ms_ecmwf_ens_p1d"
+CURVE_WIND_HIST = None                                  # no ERA5 10m surface wind in silver layer
+CURVE_WIND_FCST = "wind_speed_100m_ms_ecmwf_ens_p1d"   # 100m ENS (closest available)
 MODEL_HIST = "ecmwf-era5"
 MODEL_FCST = "ecmwf-ens"
 

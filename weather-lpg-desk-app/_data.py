@@ -465,11 +465,13 @@ def load_hurricane_data() -> tuple[list[dict], dict[str, str]]:
 def load_nafrica_wind() -> pd.DataFrame:
     """Wind speeds (actual + forecast) at North Africa corridor ports."""
     sql = f"""
-    SELECT city, delivery_date, source, wind_speed_ms
+    SELECT city, delivery_date, source,
+           wind_p10, wind_p50, wind_p90, pct_above_warning, pct_above_gale
     FROM {SBX_SCHEMA}.nafrica_wind
     ORDER BY city, delivery_date
     """
     df = run_query(sql)
-    df["wind_speed_ms"] = pd.to_numeric(df["wind_speed_ms"], errors="coerce")
+    for col in ["wind_p10", "wind_p50", "wind_p90", "pct_above_warning", "pct_above_gale"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
     df["delivery_date"] = pd.to_datetime(df["delivery_date"], errors="coerce")
     return df

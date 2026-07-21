@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# ///
 # DBTITLE 1,LPG Desk Sandbox Refresh
 """
 LPG Desk Sandbox Refresh
@@ -385,11 +389,15 @@ WITH actuals AS (
     AND ({PADD3_COORD_FILTER})
 ),
 forecasts AS (
-  SELECT {PADD3_CITY_CASE} AS city, DATE(delivery_start) AS delivery_date, 'forecast' AS source, value AS temperature_c
+  -- ENS stores 50 ensemble members per grid point per day; AVG gives the ensemble mean.
+  SELECT {PADD3_CITY_CASE} AS city, DATE(delivery_start) AS delivery_date, 'forecast' AS source,
+         AVG(value) AS temperature_c
   FROM dna_prod_silver.meteomatics.temperature_forecast
   WHERE curve_name = 't_mean_2m_24h_c_ecmwf_ens_p1d' AND model = 'ecmwf-ens'
-    AND created_at = (SELECT MAX(created_at) FROM dna_prod_silver.meteomatics.temperature_forecast WHERE model = 'ecmwf-ens')
+    AND created_at = (SELECT MAX(created_at) FROM dna_prod_silver.meteomatics.temperature_forecast
+                      WHERE model = 'ecmwf-ens' AND curve_name = 't_mean_2m_24h_c_ecmwf_ens_p1d')
     AND ({PADD3_COORD_FILTER})
+  GROUP BY {PADD3_CITY_CASE}, DATE(delivery_start)
 )
 SELECT * FROM actuals WHERE city IS NOT NULL
 UNION ALL SELECT * FROM forecasts WHERE city IS NOT NULL
@@ -403,24 +411,37 @@ print(f"padd3_coastal_temps: {spark.sql('SELECT COUNT(*) FROM dna_snbx_weather.l
 NAFRICA_CITY_CASE = city_case_sql(NAFRICA_WIND_CORRIDOR)
 NAFRICA_COORD_FILTER = coord_filter_sql(NAFRICA_WIND_CORRIDOR.values())
 
+# ENS stores 50 members per grid point per day — compute percentiles and risk %.
+# Schema: wind_p10/p50/p90 (ensemble spread), pct_above_warning/gale (% members above 15/20 m/s).
+# Source: 'actual' = past delivery dates from latest ENS run; 'forecast' = future dates.
 spark.sql(f"""
 CREATE OR REPLACE TABLE dna_snbx_weather.lpg_desk.nafrica_wind AS
-WITH actuals AS (
-  SELECT {NAFRICA_CITY_CASE} AS city, DATE(delivery_start) AS delivery_date, 'actual' AS source, value AS wind_speed_ms
-  FROM dna_prod_silver.meteomatics.wind
-  WHERE curve_name = 'wind_speed_10m_ms_ecmwf_era5_p1d' AND model = 'ecmwf-era5'
-    AND delivery_start >= CURRENT_DATE() - INTERVAL 30 DAYS
-    AND ({NAFRICA_COORD_FILTER})
+WITH latest_run AS (
+  SELECT MAX(created_at) AS max_ts
+  FROM dna_prod_silver.meteomatics.wind_speed_forecast
+  WHERE model = 'ecmwf-ens' AND curve_name = 'wind_speed_100m_ms_ecmwf_ens_p1d'
 ),
-forecasts AS (
-  SELECT {NAFRICA_CITY_CASE} AS city, DATE(delivery_start) AS delivery_date, 'forecast' AS source, value AS wind_speed_ms
-  FROM dna_prod_silver.meteomatics.wind_forecast
-  WHERE curve_name = 'wind_speed_10m_ms_ecmwf_ens_p1d' AND model = 'ecmwf-ens'
-    AND created_at = (SELECT MAX(created_at) FROM dna_prod_silver.meteomatics.wind_forecast WHERE model = 'ecmwf-ens')
+all_days AS (
+  SELECT
+    {NAFRICA_CITY_CASE}                                                                 AS city,
+    DATE(delivery_start)                                                                AS delivery_date,
+    CASE WHEN DATE(delivery_start) <= CURRENT_DATE() THEN 'actual' ELSE 'forecast' END AS source,
+    PERCENTILE_CONT(0.1) WITHIN GROUP (ORDER BY value)                                 AS wind_p10,
+    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY value)                                 AS wind_p50,
+    PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY value)                                 AS wind_p90,
+    AVG(CASE WHEN value >= 15.0 THEN 100.0 ELSE 0.0 END)                              AS pct_above_warning,
+    AVG(CASE WHEN value >= 20.0 THEN 100.0 ELSE 0.0 END)                              AS pct_above_gale
+  FROM dna_prod_silver.meteomatics.wind_speed_forecast
+  CROSS JOIN latest_run
+  WHERE curve_name = 'wind_speed_100m_ms_ecmwf_ens_p1d'
+    AND model = 'ecmwf-ens'
+    AND created_at = latest_run.max_ts
     AND ({NAFRICA_COORD_FILTER})
+  GROUP BY
+    {NAFRICA_CITY_CASE}, DATE(delivery_start),
+    CASE WHEN DATE(delivery_start) <= CURRENT_DATE() THEN 'actual' ELSE 'forecast' END
 )
-SELECT * FROM actuals WHERE city IS NOT NULL
-UNION ALL SELECT * FROM forecasts WHERE city IS NOT NULL
+SELECT * FROM all_days WHERE city IS NOT NULL
 ORDER BY city, delivery_date
 """)
 print(f"nafrica_wind: {spark.sql('SELECT COUNT(*) FROM dna_snbx_weather.lpg_desk.nafrica_wind').first()[0]} rows")
@@ -428,7 +449,7 @@ print(f"nafrica_wind: {spark.sql('SELECT COUNT(*) FROM dna_snbx_weather.lpg_desk
 # COMMAND ----------
 
 # DBTITLE 1,7. Refresh complete
-print(f"\n{'='*60}")
+
 print(f"LPG Desk Sandbox Refresh COMPLETE: {datetime.now()}")
 print(f"{'='*60}")
 

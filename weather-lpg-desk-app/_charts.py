@@ -374,27 +374,68 @@ def make_hurricane_map(storms: list[dict], region_name: str, bbox: dict, pad_deg
 # TAB 7: NORTH AFRICA WIND
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _hex_to_rgba(hex_color: str, alpha: float = 0.15) -> str:
+    """Convert '#rrggbb' to 'rgba(r, g, b, alpha)' for Plotly fill colors."""
+    h = hex_color.lstrip('#')
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+
 def make_wind_corridor_chart(df: pd.DataFrame, cities: list[str] | None = None) -> go.Figure:
-    """Wind speed timeseries along the North Africa shipping corridor."""
-    fig = _base_fig("North Africa Shipping Corridor — Wind Speed", height=440)
+    """ENS P50 wind speed per city with P10–P90 shaded spread band.
+
+    Solid line = actual (past delivery dates from latest ENS run).
+    Dashed line = forecast (future delivery dates). The shaded band covers the
+    10th–90th percentile of the 50-member ensemble — wider band = more uncertainty.
+    """
+    fig = _base_fig("North Africa Shipping Corridor — Wind Speed (100m ENS P10/P50/P90)", height=440)
 
     if cities is None:
         cities = df["city"].unique().tolist()
 
     for city in cities:
-        cdf = df[df["city"] == city]
+        cdf = df[df["city"] == city].sort_values("delivery_date")
+        if cdf.empty:
+            continue
         color = NAFRICA_WIND_COLORS.get(city, INK_MUTED)
+        fill = _hex_to_rgba(color, 0.12)
+
+        # P10–P90 band: invisible lower bound, filled upper bound
+        fig.add_trace(go.Scatter(
+            x=cdf["delivery_date"], y=cdf["wind_p10"],
+            mode="lines", line=dict(width=0),
+            showlegend=False, hoverinfo="skip", name=f"_{city}_p10",
+        ))
+        fig.add_trace(go.Scatter(
+            x=cdf["delivery_date"], y=cdf["wind_p90"],
+            mode="lines", line=dict(width=0),
+            fill="tonexty", fillcolor=fill,
+            showlegend=False, hoverinfo="skip", name=f"_{city}_p90",
+        ))
+
+        # P50 median — split actual (solid) vs forecast (dashed)
         act = cdf[cdf["source"] == "actual"]
+        fct = cdf[cdf["source"] == "forecast"]
         if not act.empty:
             fig.add_trace(go.Scatter(
-                x=act["delivery_date"], y=act["wind_speed_ms"], name=city, mode="lines",
+                x=act["delivery_date"], y=act["wind_p50"],
+                name=city, mode="lines",
                 line=dict(color=color, width=2),
+                hovertemplate=(
+                    f"<b>{city}</b><br>%{{x|%d %b}}<br>"
+                    "P50: %{y:.1f} m/s<extra></extra>"
+                ),
             ))
-        fct = cdf[cdf["source"] == "forecast"]
         if not fct.empty:
             fig.add_trace(go.Scatter(
-                x=fct["delivery_date"], y=fct["wind_speed_ms"], name=f"{city} (fcst)", mode="lines",
-                line=dict(color=color, width=2, dash="dash"), showlegend=False,
+                x=fct["delivery_date"], y=fct["wind_p50"],
+                name=f"{city} (fcst)", mode="lines",
+                line=dict(color=color, width=2, dash="dash"),
+                showlegend=False,
+                hovertemplate=(
+                    f"<b>{city}</b><br>%{{x|%d %b}}<br>"
+                    "P50: %{y:.1f} m/s<extra></extra>"
+                ),
             ))
 
     fig.add_hline(y=WIND_CAUTION_MS, line_dash="dot", line_color=INK_MUTED,
@@ -409,13 +450,34 @@ def make_wind_corridor_chart(df: pd.DataFrame, cities: list[str] | None = None) 
 
 
 def make_wind_exceedance_chart(df: pd.DataFrame) -> go.Figure:
-    """Forecast days above the warning threshold in the next 14 days, by port."""
-    fig = _base_fig(f"Forecast Days Above Warning Threshold ({WIND_WARNING_MS:.0f} m/s)", height=300)
+    """Ensemble risk: % of members ≥ warning threshold per city per forecast day.
+
+    A line above 50% means the majority of the ensemble predicts disruptive winds.
+    Even 10–25% signals meaningful risk for loading/scheduling decisions.
+    """
+    fig = _base_fig(
+        f"Ensemble Risk ≥{WIND_WARNING_MS:.0f} m/s (‰ of members)", height=300
+    )
 
     fcst = df[df["source"] == "forecast"]
-    exceed = fcst[fcst["wind_speed_ms"] >= WIND_WARNING_MS]
-    counts = exceed.groupby("city").size().reset_index(name="days")
+    for city in fcst["city"].unique():
+        cdf = fcst[fcst["city"] == city].sort_values("delivery_date")
+        if cdf.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=cdf["delivery_date"], y=cdf["pct_above_warning"],
+            name=city, mode="lines+markers",
+            line=dict(color=NAFRICA_WIND_COLORS.get(city, INK_MUTED), width=1.5),
+            marker=dict(size=5),
+            hovertemplate=(
+                f"<b>{city}</b><br>%{{x|%d %b}}<br>Risk: %{{y:.0f}}%<extra></extra>"
+            ),
+        ))
 
-    fig.add_trace(go.Bar(x=counts["city"], y=counts["days"], marker_color=CAT_ORANGE, showlegend=False))
-    fig.update_yaxes(title_text="Days")
+    fig.add_hline(y=50, line_dash="dot", line_color=INK_MUTED,
+                  annotation_text="50% (majority)", annotation_position="right")
+    fig.update_yaxes(
+        title_text=f"% Members ≥ {WIND_WARNING_MS:.0f} m/s",
+        range=[0, 100],
+    )
     return fig

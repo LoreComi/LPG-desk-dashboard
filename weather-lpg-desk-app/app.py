@@ -328,12 +328,14 @@ def render_nafrica_wind():
         return
 
     fcst = wind_df[wind_df["source"] == "forecast"]
-    gale_events = fcst[fcst["wind_speed_ms"] >= WIND_GALE_MS]
+    # Flag if ≥10% of ensemble members (5/50) forecast gale-force winds
+    gale_events = fcst[fcst["pct_above_gale"] >= 10.0]
     if not gale_events.empty:
         cities_gale = gale_events["city"].unique().tolist()
+        max_pct = int(gale_events.groupby("city")["pct_above_gale"].max().max())
         st.markdown(
-            status_banner("💨", f"GALE WARNING: {', '.join(cities_gale)} forecast "
-                                f"≥{WIND_GALE_MS:.0f} m/s in the next 14 days", "critical"),
+            status_banner("💨", f"GALE RISK: {', '.join(cities_gale)} — up to {max_pct}% of members "
+                                f"forecast ≥{WIND_GALE_MS:.0f} m/s in the next 14 days", "critical"),
             unsafe_allow_html=True,
         )
 
