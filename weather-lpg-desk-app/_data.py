@@ -422,20 +422,59 @@ def _in_bbox(lat: float, lon: float, bbox: dict) -> bool:
     return bbox["lat_min"] <= lat <= bbox["lat_max"] and bbox["lon_min"] <= lon <= bbox["lon_max"]
 
 
+_MONTH_NUM = {m: i + 1 for i, m in enumerate(
+    ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'])}
+
+
 def _parse_nhc_forecast_positions(text: str) -> list[dict]:
-    """Parse 5-day forecast positions out of an NHC forecast advisory."""
-    pattern = re.compile(
-        r'(INIT|\d+\s*H[RS]?)\s+\d+/\d{4}Z\s+(\d+\.?\d*)\s*([NS])\s+(\d+\.?\d*)\s*([EW])\s+(\d+)\s+KT',
-        re.IGNORECASE,
+    """Parse the forecast track out of an NHC Forecast/Advisory (TCM) product.
+
+    NHC's real format is prose, not the old fixed-width table this used to
+    assume: the initial position reads "...CENTER LOCATED NEAR 28.7N  86.4W
+    AT 21/0900Z" and each forecast point is "FORECAST VALID 21/1800Z 29.0N
+    86.8W" / "OUTLOOK VALID 25/0600Z ...". Valid times only carry a
+    day-of-month + HHMM, so hours-from-now is computed by resolving each into
+    a real datetime against the advisory's issuance month/year, rolling the
+    month forward whenever the day number goes backwards (i.e. the forecast
+    crosses a month boundary).
+    """
+    month_m = re.search(r'\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s+(\d{1,2})\s+(\d{4})\b', text)
+    init_m = re.search(
+        r'CENTER LOCATED NEAR\s+(\d+\.?\d*)\s*([NS])\s+(\d+\.?\d*)\s*([EW])\s+AT\s+(\d{1,2})/(\d{4})Z',
+        text,
     )
+    if not month_m or not init_m:
+        return []
+
+    year, month = int(month_m.group(3)), _MONTH_NUM[month_m.group(1)]
+    init_day = int(init_m.group(5))
+    init_hhmm = init_m.group(6)
+    try:
+        init_dt = datetime(year, month, init_day, int(init_hhmm[:2]), int(init_hhmm[2:]))
+    except ValueError:
+        return []
+
     out = []
-    for m in pattern.finditer(text):
-        step, lat_v, lat_h, lon_v, lon_h, wind = m.groups()
-        step_clean = re.sub(r'[^0-9]', '', step)
-        hours = 0 if step.upper().strip() == 'INIT' else (int(step_clean) if step_clean else 0)
+    prev_day = init_day
+    for m in re.finditer(
+        r'(?:FORECAST|OUTLOOK)\s+VALID\s+(\d{1,2})/(\d{4})Z\s+(\d+\.?\d*)\s*([NS])\s+(\d+\.?\d*)\s*([EW])',
+        text,
+    ):
+        day, hhmm, lat_v, lat_h, lon_v, lon_h = m.groups()
+        day = int(day)
+        if day < prev_day:   # forecast valid time rolled into the next month
+            month += 1
+            if month > 12:
+                month, year = 1, year + 1
+        prev_day = day
+        try:
+            valid_dt = datetime(year, month, day, int(hhmm[:2]), int(hhmm[2:]))
+        except ValueError:
+            continue
         lat = float(lat_v) * (1 if lat_h.upper() == 'N' else -1)
         lon = float(lon_v) * (1 if lon_h.upper() == 'E' else -1)
-        out.append({'hours': hours, 'lat': lat, 'lon': lon, 'wind_kt': int(wind)})
+        hours = round((valid_dt - init_dt).total_seconds() / 3600)
+        out.append({'hours': hours, 'lat': lat, 'lon': lon})
     return out
 
 
@@ -482,8 +521,9 @@ def load_hurricane_data() -> tuple[list[dict], dict[str, str]]:
                     'classification': s.get('classification', 'TD'),
                     'last_update': s.get('lastUpdate', ''),
                     'forecast_track': [],
+                    'observed_track': [],   # filled in below from IBTrACS (global best-track), if matched
                 }
-                fcst_url = (s.get('forecastAdvisory') or {}).get('product', '')
+                fcst_url = (s.get('forecastAdvisory') or {}).get('url', '')
                 if fcst_url:
                     try:
                         fr = requests.get(fcst_url, headers=headers, timeout=15, verify=False)
@@ -499,7 +539,12 @@ def load_hurricane_data() -> tuple[list[dict], dict[str, str]]:
     except Exception as e:
         sources['NHC (Atlantic)'] = str(e)
 
-    # ── IBTrACS ACTIVE: NW Australia (Southern Hemisphere cyclones) ────────────
+    # ── IBTrACS ACTIVE: observed tracks (global) + NW Australia storms ─────────
+    # IBTrACS is the only source used for NW Australia storms at all (no NHC
+    # coverage there), but it's also a global best-track feed — every row for
+    # a still-active storm's full history, not just its latest position — so
+    # the same fetch doubles as the *observed* (past) track for the Atlantic
+    # storms above too, which until now only ever carried a forecast track.
     try:
         ibtracs_url = (
             "https://www.ncei.noaa.gov/data/international-best-track-archive-for-climate-"
@@ -509,11 +554,34 @@ def load_hurricane_data() -> tuple[list[dict], dict[str, str]]:
         if ir.status_code == 200:
             df = pd.read_csv(io.StringIO(ir.text), skiprows=[1], low_memory=False)
             df['ISO_TIME'] = pd.to_datetime(df['ISO_TIME'], errors='coerce')
+            df['LAT'] = pd.to_numeric(df['LAT'], errors='coerce')
+            df['LON'] = pd.to_numeric(df['LON'], errors='coerce')
             df = df.dropna(subset=['ISO_TIME', 'LAT', 'LON'])
             if 'TRACK_TYPE' in df.columns:
                 prov = df[df['TRACK_TYPE'].astype(str).str.strip().str.lower() == 'provisional']
                 if not prov.empty:
                     df = prov
+
+            def _track_points(sub_df: pd.DataFrame) -> list[dict]:
+                sub_df = sub_df.sort_values('ISO_TIME')
+                return [{'lat': float(r['LAT']), 'lon': float(r['LON'])} for _, r in sub_df.iterrows()]
+
+            tracks_by_sid: dict[str, list[dict]] = {}
+            tracks_by_name: dict[str, list[dict]] = {}
+            for sid, g in df.groupby('SID'):
+                pts = _track_points(g)
+                tracks_by_sid[str(sid)] = pts
+                nm = str(g['NAME'].iloc[-1]).strip().upper()
+                if nm and nm not in ('UNNAMED', 'NOT_NAMED', 'NAN'):
+                    tracks_by_name[nm] = pts
+
+            # Attach the observed track to the Atlantic storms found via NHC above.
+            for s in storms:
+                if s['basin'] == 'US Gulf & Atlantic':
+                    pts = tracks_by_name.get(s['name'].strip().upper(), [])
+                    if len(pts) > 1:
+                        s['observed_track'] = pts[:-1]   # last point == current position, drawn separately
+
             latest = df.sort_values('ISO_TIME').groupby('SID').last().reset_index()
             cutoff = pd.Timestamp(datetime.utcnow() - timedelta(hours=48))
             latest = latest[latest['ISO_TIME'] >= cutoff]
@@ -541,12 +609,15 @@ def load_hurricane_data() -> tuple[list[dict], dict[str, str]]:
                     if raw and raw.lower() != 'nan':
                         pressure = raw
                         break
+                sid_str = str(row.get('SID', ''))
+                track_pts = tracks_by_sid.get(sid_str, [])
                 storms.append({
-                    'id': str(row.get('SID', name)), 'name': name.capitalize(),
+                    'id': sid_str or name, 'name': name.capitalize(),
                     'basin': 'NW Australia (Cyclone)', 'lat': lat, 'lon': lon, 'wind_kt': wind_kt,
                     'pressure_mb': pressure, 'category': _kt_to_category(wind_kt),
                     'classification': 'TY' if wind_kt >= 64 else ('TS' if wind_kt >= 34 else 'TD'),
                     'last_update': str(row['ISO_TIME'])[:16], 'forecast_track': [],
+                    'observed_track': track_pts[:-1] if len(track_pts) > 1 else [],
                 })
                 n_added += 1
             sources['IBTrACS (NW Australia)'] = f'ok ({n_added} storm(s) in region)'

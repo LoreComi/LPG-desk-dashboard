@@ -380,7 +380,10 @@ def render_padd3_coastal():
 # ══════════════════════════════════════════════════════════════════════════════
 def render_hurricanes():
     st.markdown("#### TROPICAL CYCLONES — US GULF/ATLANTIC & NW AUSTRALIA")
-    st.caption("Live active-storm tracking (NHC + IBTrACS). LPG export/loading disruption risk.")
+    st.caption(
+        "Live active-storm tracking (NHC + IBTrACS). LPG export/loading disruption risk. "
+        "Solid line = observed track so far, dotted line = forecast."
+    )
 
     with st.spinner("Fetching live storm data…"):
         try:

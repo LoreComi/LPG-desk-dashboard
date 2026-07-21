@@ -366,6 +366,18 @@ def make_hurricane_map(storms: list[dict], region_name: str, bbox: dict, pad_deg
 
     for storm in region_storms:
         color = STORM_RAMP.get(storm["category"], INK_MUTED)
+
+        observed = storm.get("observed_track", [])
+        if observed:
+            fig.add_trace(go.Scattergeo(
+                lon=[p["lon"] for p in observed] + [storm["lon"]],
+                lat=[p["lat"] for p in observed] + [storm["lat"]],
+                mode="lines",
+                line=dict(color=color, width=2, dash="solid"),
+                opacity=0.55,
+                showlegend=False, hoverinfo="skip",
+            ))
+
         track = storm.get("forecast_track", [])
         if track:
             fig.add_trace(go.Scattergeo(
