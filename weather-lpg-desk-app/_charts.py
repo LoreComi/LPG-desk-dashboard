@@ -17,6 +17,7 @@ from _config import (
     GATUN_RATE_SURCHARGE_FT, GATUN_RESTRICTION_FT,
     WIND_CAUTION_MS, WIND_WARNING_MS, WIND_GALE_MS,
     FREEZE_THRESHOLD_C, FROST_THRESHOLD_C,
+    HDD_HISTORY_COLORS, HDD_OVERLAY_YEARS, hdd_season_label,
 )
 from _style import (
     PLOTLY_LAYOUT, GEO_LAYOUT, INK_MUTED, GRIDLINE,
@@ -47,15 +48,45 @@ def _doy_to_season_date(day_of_year: pd.Series, season_start_year: int) -> pd.Se
     return day_of_year.apply(_one)
 
 
+def _add_hdd_history_overlay(fig: go.Figure, history_df: pd.DataFrame, group_col: str, group_value: str,
+                              season_year: int, overlay_years: int = HDD_OVERLAY_YEARS,
+                              name_prefix: str = "", showlegend: bool = True) -> None:
+    """Overlay prior completed winters' cumulative HDD (muted gray, dotted) onto the
+    current season's calendar, so they read as history rather than competing with
+    the categorical PADD/region color used for the current season."""
+    if history_df is None or history_df.empty:
+        return
+    hdf = history_df[history_df[group_col] == group_value] if group_col in history_df.columns else history_df
+    if hdf.empty:
+        return
+    years = sorted(hdf["season_start_year"].dropna().unique())[-overlay_years:]
+    palette = HDD_HISTORY_COLORS[-len(years):]
+    for color, yr in zip(palette, years):
+        ydf = hdf[hdf["season_start_year"] == yr].copy()
+        if ydf.empty:
+            continue
+        ydf["date"] = _doy_to_season_date(ydf["day_of_year"], season_year)
+        ydf = ydf.sort_values("date")
+        label = ydf["season_label"].iloc[0] if "season_label" in ydf.columns else hdd_season_label(yr)
+        fig.add_trace(go.Scatter(
+            x=ydf["date"], y=ydf["cumulative_hdd"],
+            name=f"{name_prefix}{label}", mode="lines",
+            line=dict(color=color, dash="dot", width=1.3),
+            opacity=0.9, showlegend=showlegend,
+        ))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1: US HDD SEASON CHARTS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def make_hdd_season_chart(df: pd.DataFrame, padd: str, normal_df: pd.DataFrame = None) -> go.Figure:
-    """Cumulative HDD season chart for a single PADD — actual, forecast, normal."""
+def make_hdd_season_chart(df: pd.DataFrame, padd: str, normal_df: pd.DataFrame = None,
+                           history_df: pd.DataFrame = None) -> go.Figure:
+    """Cumulative HDD season chart for a single PADD — actual, forecast, normal, prior winters."""
     fig = _base_fig(f"Cumulative HDD — {padd}")
     padd_data = df[df["padd_region"] == padd] if "padd_region" in df.columns else df
     color = PADD_COLORS.get(padd, INK_MUTED)
+    season_year = _season_start_year(padd_data["delivery_date"])
 
     for model in padd_data["model_label"].unique():
         mdf = padd_data[padd_data["model_label"] == model]
@@ -66,10 +97,11 @@ def make_hdd_season_chart(df: pd.DataFrame, padd: str, normal_df: pd.DataFrame =
             line=dict(color=color, dash=dash, width=2),
         ))
 
+    _add_hdd_history_overlay(fig, history_df, "padd_region", padd, season_year)
+
     if normal_df is not None and not normal_df.empty:
         ndf = normal_df[normal_df["padd_region"] == padd] if "padd_region" in normal_df.columns else normal_df
         if not ndf.empty:
-            season_year = _season_start_year(padd_data["delivery_date"])
             ndf = ndf.copy()
             ndf["date"] = _doy_to_season_date(ndf["day_of_year"], season_year)
             ndf = ndf.sort_values("date")   # season order (Oct1->Mar31), not raw day_of_year
@@ -109,13 +141,15 @@ def make_hdd_comparison_chart(df: pd.DataFrame, padd: str) -> go.Figure:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def make_asia_hdd_season_chart(df: pd.DataFrame, selected_regions: list[str],
-                                normal_df: pd.DataFrame = None) -> go.Figure:
-    """Cumulative HDD for selected Asia regions — actual, forecast, normal."""
+                                normal_df: pd.DataFrame = None,
+                                history_df: pd.DataFrame = None) -> go.Figure:
+    """Cumulative HDD for selected Asia regions — actual, forecast, normal, prior winters."""
     fig = _base_fig("Asia HDD Season — Cumulative (population-weighted)")
 
     for region in selected_regions:
         rdf = df[df["region"] == region]
         color = ASIA_COLORS.get(region, INK_MUTED)
+        season_year = _season_start_year(rdf["delivery_date"])
         for model in rdf["model_label"].unique():
             mdf = rdf[rdf["model_label"] == model]
             dash = "solid" if "Actual" in model else "dash"
@@ -124,10 +158,11 @@ def make_asia_hdd_season_chart(df: pd.DataFrame, selected_regions: list[str],
                 name=f"{region} ({model})", mode="lines",
                 line=dict(color=color, dash=dash, width=2),
             ))
+        _add_hdd_history_overlay(fig, history_df, "region", region, season_year,
+                                  name_prefix=f"{region} ", showlegend=False)
         if normal_df is not None and not normal_df.empty:
             ndf = normal_df[normal_df["region"] == region]
             if not ndf.empty:
-                season_year = _season_start_year(rdf["delivery_date"])
                 ndf = ndf.copy()
                 ndf["date"] = _doy_to_season_date(ndf["day_of_year"], season_year)
                 ndf = ndf.sort_values("date")   # season order (Oct1->Mar31), not raw day_of_year

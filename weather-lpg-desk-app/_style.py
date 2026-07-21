@@ -183,6 +183,27 @@ p, .stMarkdown, span, label {{ color: var(--text-primary); }}
 .kpi-delta-down  {{ color: {CAT_BLUE} !important; }}
 .kpi-delta-flat  {{ color: var(--text-muted) !important; }}
 
+.kpi-rank {{
+    display: inline-block;
+    margin-top: 8px;
+    padding: 2px 9px;
+    font-size: 0.66rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--text-secondary);
+    background: rgba(11,11,11,0.05);
+    border-radius: 999px;
+}}
+
+/* Groups a KPI row + its chart(s) into one visual card per entity */
+.section-block {{
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 14px 16px 6px;
+    margin-bottom: 18px;
+}}
+
 /* Status alert banners — icon + label, never color alone */
 .status-banner {{
     border-radius: var(--radius-md);

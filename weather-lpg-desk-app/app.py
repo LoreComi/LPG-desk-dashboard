@@ -25,10 +25,12 @@ from _config import (
     HDD_BASE_TEMP,
     GATUN_ANALOG_YEARS, GATUN_RESTRICTION_FT, GATUN_RATE_SURCHARGE_FT,
     HURRICANE_BASINS,
+    is_in_hdd_season, hdd_season_label, hdd_season_start_year,
 )
 from _data import (
-    load_hdd_season, load_hdd_normal_daily, load_hdd_run_comparison,
-    load_asia_hdd_season, load_asia_hdd_normal,
+    load_hdd_season, load_hdd_normal_daily, load_hdd_run_comparison, load_hdd_season_history,
+    load_asia_hdd_season, load_asia_hdd_normal, load_asia_hdd_season_history,
+    compute_season_kpis,
     load_india_precip_anomaly,
     load_gatun_lake_levels, build_gatun_analog_overlays,
     load_padd3_coastal_temps,
@@ -86,6 +88,42 @@ def status_banner(icon: str, text: str, level: str = "warning") -> str:
     return f'<div class="status-banner status-banner-{level}">{icon} {text}</div>'
 
 
+def _ordinal(n: int) -> str:
+    n = int(n)
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def hdd_kpi_card(label: str, kpis: dict | None) -> str:
+    """Season-to-date HDD KPI card — cumulative, vs-normal delta, coldest/warmest rank.
+
+    An HDD delta's sign is the opposite of a raw temperature anomaly: MORE
+    HDD than normal means COLDER, so a positive delta gets the cool/blue
+    accent here (unlike kpi_card(), built for values where positive == warmer).
+    """
+    if kpis is None:
+        return raw_kpi_card(label, "N/A", "kpi-card-neutral")
+
+    value_str = f"{kpis['cumulative_to_date']:.0f} HDD"
+    card_class = "kpi-card-neutral"
+    delta_html = ""
+    delta = kpis.get("delta_vs_normal")
+    if delta is not None and not np.isnan(delta):
+        card_class = "kpi-card-cool" if delta > 0 else ("kpi-card-warm" if delta < 0 else "kpi-card-neutral")
+        d_cls = "kpi-delta-up" if delta > 0 else ("kpi-delta-down" if delta < 0 else "kpi-delta-flat")
+        arrow = "▲" if delta > 0 else ("▼" if delta < 0 else "●")
+        word = "colder" if delta > 0 else ("milder" if delta < 0 else "on normal")
+        delta_html = f'<div class="kpi-delta {d_cls}">{arrow} {abs(delta):.0f} HDD {word}</div>'
+
+    rank_html = ""
+    rank, pool = kpis.get("rank"), kpis.get("rank_pool_size")
+    if rank and pool:
+        rank_html = f'<div class="kpi-rank">{_ordinal(rank)} coldest of last {pool} yrs</div>'
+
+    return (f'<div class="kpi-card {card_class}"><div class="kpi-label">{label}</div>'
+            f'<div class="kpi-value">{value_str}</div>{delta_html}{rank_html}</div>')
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1: US HDD BY PADD
 # ══════════════════════════════════════════════════════════════════════════════
@@ -97,6 +135,7 @@ def render_us_hdd():
         season_df = load_hdd_season()
         normal_df = load_hdd_normal_daily()
         run_df = load_hdd_run_comparison()
+        history_df = load_hdd_season_history()
     except Exception as e:
         st.error(f"Failed to load US HDD data: {e}")
         return
@@ -109,13 +148,32 @@ def render_us_hdd():
         st.info("Select at least one PADD.")
         return
 
+    padd_kpis = {padd: compute_season_kpis(season_df, normal_df, history_df, "padd_region", padd)
+                 for padd in selected_padds}
+
+    if not is_in_hdd_season():
+        as_of = next((k["as_of"] for k in padd_kpis.values() if k), None)
+        label = hdd_season_label(hdd_season_start_year(as_of)) if as_of is not None else "last winter"
+        st.markdown(
+            status_banner("📅", f"Not in HDD seasonality — showing final values for {label} below.", "warning"),
+            unsafe_allow_html=True,
+        )
+
+    kpi_cols = st.columns(len(selected_padds))
+    for i, padd in enumerate(selected_padds):
+        with kpi_cols[i % len(kpi_cols)]:
+            st.markdown(hdd_kpi_card(padd, padd_kpis[padd]), unsafe_allow_html=True)
+
+    st.divider()
+
     cols = st.columns(min(len(selected_padds), 3))
     for i, padd in enumerate(selected_padds):
         with cols[i % len(cols)]:
-            fig = make_hdd_season_chart(season_df, padd, normal_df)
+            fig = make_hdd_season_chart(season_df, padd, normal_df, history_df)
             st.plotly_chart(fig, use_container_width=True)
 
     if not run_df.empty:
+        st.divider()
         st.markdown("##### Run Comparison (latest 3 model runs)")
         cols2 = st.columns(min(len(selected_padds), 3))
         for i, padd in enumerate(selected_padds):
@@ -134,6 +192,7 @@ def render_asia_hdd():
     try:
         season_df = load_asia_hdd_season()
         normal_df = load_asia_hdd_normal()
+        history_df = load_asia_hdd_season_history()
     except Exception as e:
         st.error(f"Failed to load Asia HDD data: {e}")
         return
@@ -146,7 +205,25 @@ def render_asia_hdd():
         st.info("Select at least one region.")
         return
 
-    fig = make_asia_hdd_season_chart(season_df, selected, normal_df)
+    region_kpis = {region: compute_season_kpis(season_df, normal_df, history_df, "region", region)
+                   for region in selected}
+
+    if not is_in_hdd_season():
+        as_of = next((k["as_of"] for k in region_kpis.values() if k), None)
+        label = hdd_season_label(hdd_season_start_year(as_of)) if as_of is not None else "last winter"
+        st.markdown(
+            status_banner("📅", f"Not in HDD seasonality — showing final values for {label} below.", "warning"),
+            unsafe_allow_html=True,
+        )
+
+    kpi_cols = st.columns(len(selected))
+    for i, region in enumerate(selected):
+        with kpi_cols[i % len(kpi_cols)]:
+            st.markdown(hdd_kpi_card(region, region_kpis[region]), unsafe_allow_html=True)
+
+    st.divider()
+
+    fig = make_asia_hdd_season_chart(season_df, selected, normal_df, history_df)
     st.plotly_chart(fig, use_container_width=True)
 
     fig2 = make_asia_hdd_bar_chart(season_df, selected)
@@ -175,6 +252,8 @@ def render_india_precip():
     for i, (_, row) in enumerate(latest.iterrows()):
         with kpi_cols[i % len(kpi_cols)]:
             st.markdown(kpi_card(row["subregion"], row["deviation_pct"], "%"), unsafe_allow_html=True)
+
+    st.divider()
 
     col1, col2 = st.columns([2, 1])
     with col1:
@@ -218,6 +297,8 @@ def render_gatun_lake():
     with kc2:
         st.markdown(raw_kpi_card("Status", status, card_class), unsafe_allow_html=True)
 
+    st.divider()
+
     analog_overlays = build_gatun_analog_overlays(hist_df, proj_df)
     fig = make_gatun_lake_chart(hist_df, proj_df, analog_overlays)
     st.plotly_chart(fig, use_container_width=True)
@@ -257,6 +338,8 @@ def render_padd3_coastal():
     if not selected_cities:
         st.info("Select at least one terminal.")
         return
+
+    st.divider()
 
     fig = make_padd3_temp_chart(temp_df, selected_cities)
     st.plotly_chart(fig, use_container_width=True)
@@ -298,6 +381,7 @@ def render_hurricanes():
         st.markdown(status_banner("🌀", f"{len(storms)} active storm(s) tracked — strongest at "
                                         f"{max_wind} kt.", "warning"), unsafe_allow_html=True)
 
+    st.divider()
     st.markdown("##### ACTIVE STORMS")
     rows = [{
         "Name": s["name"], "Region": s["basin"], "Category": s["category"],
@@ -346,6 +430,8 @@ def render_nafrica_wind():
     if not selected_cities:
         st.info("Select at least one port.")
         return
+
+    st.divider()
 
     col1, col2 = st.columns([2, 1])
     with col1:

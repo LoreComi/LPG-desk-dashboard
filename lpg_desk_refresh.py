@@ -30,12 +30,22 @@ for Gatun Lake or hurricanes. This version:
   - computes India's climatology as a true day-of-year normal (2000-2024),
     not a trailing 30-day rolling average, and populates the forecast leg
     that was previously hardcoded NULL
+  - filters hdd_season/asia_hdd_season to actual in-season days (Oct1-Mar31);
+    previously the actuals/forecast legs pulled every day since last Oct 1
+    with no day-of-year filter, so the "season" cumulative kept accumulating
+    near-zero HDD through spring/summer instead of stopping at season end
+  - adds hdd_season_history / asia_hdd_season_history — daily + cumulative
+    HDD for prior completed winters, used by the app to overlay past seasons
+    on the chart and to rank the current (or, off-season, the most recent
+    completed) winter against its history
 
 Sandbox tables (must stay in sync with the lookup tables below, which mirror
 weather-lpg-desk-app/_config.py — update both if PADD/city/region boundaries
 change):
   - hdd_season, hdd_normal, hdd_run_comparison   (US HDD by PADD)
+  - hdd_season_history                           (US HDD — prior winters)
   - asia_hdd_season, asia_hdd_normal             (Asia HDD)
+  - asia_hdd_season_history                      (Asia HDD — prior winters)
   - india_precip_anomaly                         (India precip vs climatology)
   - padd3_coastal_temps                          (PADD 3 export terminals)
   - nafrica_wind                                 (N.Africa shipping corridor)
@@ -167,7 +177,9 @@ WITH padd_assign AS (
 actuals AS (
   SELECT 'Actual (ERA5)' AS model_label, padd_region, dt AS delivery_date,
     GREATEST(0, 18.0 - AVG(temperature)) AS daily_hdd
-  FROM padd_assign WHERE padd_region IS NOT NULL GROUP BY padd_region, dt
+  FROM padd_assign
+  WHERE padd_region IS NOT NULL AND (DAYOFYEAR(dt) >= 274 OR DAYOFYEAR(dt) <= 90)
+  GROUP BY padd_region, dt
 ),
 fcst_assign AS (
   SELECT DATE(delivery_start) AS dt, value AS temperature, {PADD_CASE} AS padd_region
@@ -179,7 +191,9 @@ fcst_assign AS (
 forecasts AS (
   SELECT 'EC-ens (14d)' AS model_label, padd_region, dt AS delivery_date,
     GREATEST(0, 18.0 - AVG(temperature)) AS daily_hdd
-  FROM fcst_assign WHERE padd_region IS NOT NULL GROUP BY padd_region, dt
+  FROM fcst_assign
+  WHERE padd_region IS NOT NULL AND (DAYOFYEAR(dt) >= 274 OR DAYOFYEAR(dt) <= 90)
+  GROUP BY padd_region, dt
 ),
 combined AS (SELECT * FROM actuals UNION ALL SELECT * FROM forecasts)
 SELECT model_label, padd_region, delivery_date, daily_hdd,
@@ -207,6 +221,40 @@ SELECT padd_region, day_of_year, AVG(daily_hdd) AS daily_hdd_normal
 FROM daily_agg GROUP BY padd_region, day_of_year ORDER BY padd_region, day_of_year
 """)
 print(f"hdd_normal: {spark.sql('SELECT COUNT(*) FROM dna_snbx_weather.lpg_desk.hdd_normal').first()[0]} rows")
+
+# COMMAND ----------
+
+# DBTITLE 1,1b. US HDD history — prior completed winters (overlay + rank)
+spark.sql(f"""
+CREATE OR REPLACE TABLE dna_snbx_weather.lpg_desk.hdd_season_history AS
+WITH padd_daily AS (
+  SELECT DATE(delivery_start) AS dt, DAYOFYEAR(delivery_start) AS day_of_year,
+    {PADD_CASE} AS padd_region, value AS temperature
+  FROM dna_prod_silver.meteomatics.temperature
+  WHERE curve_name = 't_mean_2m_24h_c_ecmwf_era5_p1d' AND model = 'ecmwf-era5'
+    AND YEAR(delivery_start) BETWEEN 2000 AND YEAR(CURRENT_DATE())
+    AND (DAYOFYEAR(delivery_start) >= 274 OR DAYOFYEAR(delivery_start) <= 90)
+    AND latitude BETWEEN 24 AND 50 AND longitude BETWEEN -125 AND -65
+),
+daily_agg AS (
+  SELECT padd_region, dt, day_of_year,
+    GREATEST(0, 18.0 - AVG(temperature)) AS daily_hdd,
+    CASE WHEN MONTH(dt) >= 10 THEN YEAR(dt) ELSE YEAR(dt) - 1 END AS season_start_year
+  FROM padd_daily WHERE padd_region IS NOT NULL GROUP BY padd_region, dt, day_of_year
+),
+current_season AS (
+  SELECT CASE WHEN MONTH(CURRENT_DATE()) >= 10 THEN YEAR(CURRENT_DATE()) ELSE YEAR(CURRENT_DATE()) - 1 END AS yr
+)
+SELECT padd_region, season_start_year,
+  CONCAT(season_start_year, '-', LPAD(CAST((season_start_year + 1) % 100 AS STRING), 2, '0')) AS season_label,
+  day_of_year, dt AS delivery_date, daily_hdd,
+  SUM(daily_hdd) OVER (PARTITION BY padd_region, season_start_year ORDER BY dt) AS cumulative_hdd
+FROM daily_agg
+WHERE season_start_year < (SELECT yr FROM current_season)
+  AND season_start_year >= (SELECT yr FROM current_season) - 15
+ORDER BY padd_region, season_start_year, dt
+""")
+print(f"hdd_season_history: {spark.sql('SELECT COUNT(*) FROM dna_snbx_weather.lpg_desk.hdd_season_history').first()[0]} rows")
 
 # COMMAND ----------
 
@@ -261,6 +309,7 @@ city_actuals AS (
   FROM dna_prod_silver.meteomatics.temperature
   WHERE curve_name = 't_mean_2m_24h_c_ecmwf_era5_p1d' AND model = 'ecmwf-era5'
     AND delivery_start >= DATE_FORMAT(DATEADD(YEAR, -1, CURRENT_DATE()), 'yyyy-10-01')
+    AND (DAYOFYEAR(delivery_start) >= 274 OR DAYOFYEAR(delivery_start) <= 90)
     AND ({ASIA_COORD_FILTER})
   GROUP BY {ASIA_CITY_CASE}, DATE(delivery_start)
 ),
@@ -269,6 +318,7 @@ city_forecast AS (
   FROM dna_prod_silver.meteomatics.temperature_forecast
   WHERE curve_name = 't_mean_2m_24h_c_ecmwf_ens_p1d' AND model = 'ecmwf-ens'
     AND created_at = (SELECT MAX(created_at) FROM dna_prod_silver.meteomatics.temperature_forecast WHERE model = 'ecmwf-ens')
+    AND (DAYOFYEAR(delivery_start) >= 274 OR DAYOFYEAR(delivery_start) <= 90)
     AND ({ASIA_COORD_FILTER})
   GROUP BY {ASIA_CITY_CASE}, DATE(delivery_start)
 ),
@@ -321,6 +371,51 @@ SELECT region, day_of_year, AVG(daily_hdd_normal) AS daily_hdd_normal
 FROM daily_region GROUP BY region, day_of_year ORDER BY region, day_of_year
 """)
 print(f"asia_hdd_normal: {spark.sql('SELECT COUNT(*) FROM dna_snbx_weather.lpg_desk.asia_hdd_normal').first()[0]} rows")
+
+# COMMAND ----------
+
+# DBTITLE 1,3b. Asia HDD history — prior completed winters (overlay + rank)
+spark.sql(f"""
+CREATE OR REPLACE TABLE dna_snbx_weather.lpg_desk.asia_hdd_season_history AS
+WITH weights AS (
+  SELECT * FROM VALUES
+  {asia_weights_values}
+  AS t(city, region, population)
+),
+city_daily AS (
+  SELECT {ASIA_CITY_CASE} AS city, DATE(delivery_start) AS dt, DAYOFYEAR(delivery_start) AS day_of_year,
+    AVG(value) AS temperature
+  FROM dna_prod_silver.meteomatics.temperature
+  WHERE curve_name = 't_mean_2m_24h_c_ecmwf_era5_p1d' AND model = 'ecmwf-era5'
+    AND YEAR(delivery_start) BETWEEN 2000 AND YEAR(CURRENT_DATE())
+    AND (DAYOFYEAR(delivery_start) >= 274 OR DAYOFYEAR(delivery_start) <= 90)
+    AND ({ASIA_COORD_FILTER})
+  GROUP BY {ASIA_CITY_CASE}, DATE(delivery_start), DAYOFYEAR(delivery_start)
+),
+weighted AS (
+  SELECT w.region, c.dt, c.day_of_year,
+    GREATEST(0, 18.0 - c.temperature) * w.population AS weighted_hdd, w.population,
+    CASE WHEN MONTH(c.dt) >= 10 THEN YEAR(c.dt) ELSE YEAR(c.dt) - 1 END AS season_start_year
+  FROM city_daily c JOIN weights w ON c.city = w.city
+),
+region_daily AS (
+  SELECT region, season_start_year, dt, day_of_year,
+    SUM(weighted_hdd) / SUM(population) AS daily_hdd
+  FROM weighted GROUP BY region, season_start_year, dt, day_of_year
+),
+current_season AS (
+  SELECT CASE WHEN MONTH(CURRENT_DATE()) >= 10 THEN YEAR(CURRENT_DATE()) ELSE YEAR(CURRENT_DATE()) - 1 END AS yr
+)
+SELECT region, season_start_year,
+  CONCAT(season_start_year, '-', LPAD(CAST((season_start_year + 1) % 100 AS STRING), 2, '0')) AS season_label,
+  day_of_year, dt AS delivery_date, daily_hdd,
+  SUM(daily_hdd) OVER (PARTITION BY region, season_start_year ORDER BY dt) AS cumulative_hdd
+FROM region_daily
+WHERE season_start_year < (SELECT yr FROM current_season)
+  AND season_start_year >= (SELECT yr FROM current_season) - 15
+ORDER BY region, season_start_year, dt
+""")
+print(f"asia_hdd_season_history: {spark.sql('SELECT COUNT(*) FROM dna_snbx_weather.lpg_desk.asia_hdd_season_history').first()[0]} rows")
 
 # COMMAND ----------
 
@@ -453,8 +548,8 @@ print(f"nafrica_wind: {spark.sql('SELECT COUNT(*) FROM dna_snbx_weather.lpg_desk
 print(f"LPG Desk Sandbox Refresh COMPLETE: {datetime.now()}")
 print(f"{'='*60}")
 
-tables = ["hdd_season", "hdd_normal", "hdd_run_comparison",
-          "asia_hdd_season", "asia_hdd_normal",
+tables = ["hdd_season", "hdd_normal", "hdd_run_comparison", "hdd_season_history",
+          "asia_hdd_season", "asia_hdd_normal", "asia_hdd_season_history",
           "india_precip_anomaly", "padd3_coastal_temps", "nafrica_wind"]
 for t in tables:
     cnt = spark.sql(f"SELECT COUNT(*) FROM dna_snbx_weather.lpg_desk.{t}").first()[0]

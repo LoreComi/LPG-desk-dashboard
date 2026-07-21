@@ -23,6 +23,7 @@ from _config import (
     SBX_SCHEMA,
     GATUN_HIST_URL, GATUN_PROJECTION_URL, GATUN_ANALOG_YEARS,
     HURRICANE_BASINS,
+    HDD_RANK_POOL_YEARS, hdd_season_day_index,
 )
 
 # ─── Connection config ────────────────────────────────────────────────────────────
@@ -112,6 +113,89 @@ def load_hdd_run_comparison() -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_hdd_season_history() -> pd.DataFrame:
+    """Daily + cumulative HDD for prior completed winters, by PADD."""
+    sql = f"""
+    SELECT padd_region, season_start_year, season_label, day_of_year, delivery_date, daily_hdd, cumulative_hdd
+    FROM {SBX_SCHEMA}.hdd_season_history
+    ORDER BY padd_region, season_start_year, delivery_date
+    """
+    df = run_query(sql)
+    df["season_start_year"] = pd.to_numeric(df["season_start_year"], errors="coerce").astype("Int64")
+    df["day_of_year"] = pd.to_numeric(df["day_of_year"], errors="coerce").astype("Int64")
+    df["daily_hdd"] = pd.to_numeric(df["daily_hdd"], errors="coerce")
+    df["cumulative_hdd"] = pd.to_numeric(df["cumulative_hdd"], errors="coerce")
+    df["delivery_date"] = pd.to_datetime(df["delivery_date"], errors="coerce")
+    return df
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SEASON KPIs — cumulative-to-date, vs-normal delta, coldest/warmest rank
+# Shared by US HDD (padd_region) and Asia HDD (region); works identically
+# in-season (partial-season progress) and off-season (last winter's final
+# numbers), since both just compare "cumulative HDD at the same point in the
+# season" — there's no separate off-season code path.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def compute_season_kpis(season_df: pd.DataFrame, normal_df: pd.DataFrame, history_df: pd.DataFrame,
+                         group_col: str, group_value: str,
+                         rank_pool_years: int = HDD_RANK_POOL_YEARS) -> dict | None:
+    """Cumulative-to-date, delta vs normal, and coldest/warmest rank for one PADD/region.
+
+    Ranks against history_df's prior completed winters at the same
+    days-elapsed-since-Oct-1 point (not raw calendar date), so a season that
+    started tracking late or a rank pulled while off-season (full completed
+    winter) both compare apples to apples. Returns None if there's no actual
+    data yet for group_value (e.g. brand-new PADD with no ERA5 rows).
+    """
+    sdf = season_df[season_df[group_col] == group_value] if group_col in season_df.columns else season_df
+    actual = sdf[sdf["model_label"].str.contains("Actual", na=False)].dropna(subset=["cumulative_hdd", "delivery_date"])
+    if actual.empty:
+        return None
+    latest = actual.sort_values("delivery_date").iloc[-1]
+    cumulative_to_date = float(latest["cumulative_hdd"])
+    as_of = latest["delivery_date"]
+    day_idx = hdd_season_day_index(pd.Timestamp(as_of).dayofyear)
+
+    delta_vs_normal = None
+    ndf = normal_df[normal_df[group_col] == group_value] if group_col in normal_df.columns else normal_df
+    if not ndf.empty:
+        ndf = ndf.copy()
+        ndf["day_idx"] = ndf["day_of_year"].apply(lambda d: hdd_season_day_index(int(d)))
+        ndf = ndf.sort_values("day_idx")
+        ndf["cum_normal"] = ndf["daily_hdd_normal"].cumsum()
+        upto = ndf[ndf["day_idx"] <= day_idx]
+        if not upto.empty:
+            delta_vs_normal = cumulative_to_date - float(upto["cum_normal"].iloc[-1])
+
+    rank, pool_size = None, 0
+    hdf = history_df[history_df[group_col] == group_value] if group_col in history_df.columns else history_df
+    if not hdf.empty:
+        hdf = hdf.copy()
+        hdf["day_idx"] = hdf["day_of_year"].apply(lambda d: hdd_season_day_index(int(d)))
+        years = sorted(hdf["season_start_year"].dropna().unique())[-rank_pool_years:]
+        colder_or_equal = 0
+        for yr in years:
+            ydf = hdf[(hdf["season_start_year"] == yr) & (hdf["day_idx"] <= day_idx)]
+            if ydf.empty:
+                continue
+            yr_cum = float(ydf.sort_values("day_idx")["cumulative_hdd"].iloc[-1])
+            pool_size += 1
+            if yr_cum >= cumulative_to_date:
+                colder_or_equal += 1
+        if pool_size:
+            rank = colder_or_equal + 1
+
+    return {
+        "cumulative_to_date": cumulative_to_date,
+        "delta_vs_normal": delta_vs_normal,
+        "rank": rank,
+        "rank_pool_size": pool_size,
+        "as_of": as_of,
+    }
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2: ASIA HDD
 # ══════════════════════════════════════════════════════════════════════════════
@@ -142,6 +226,23 @@ def load_asia_hdd_normal() -> pd.DataFrame:
     df = run_query(sql)
     df["day_of_year"] = pd.to_numeric(df["day_of_year"], errors="coerce").astype("Int64")
     df["daily_hdd_normal"] = pd.to_numeric(df["daily_hdd_normal"], errors="coerce")
+    return df
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_asia_hdd_season_history() -> pd.DataFrame:
+    """Daily + cumulative population-weighted HDD for prior completed winters, by region."""
+    sql = f"""
+    SELECT region, season_start_year, season_label, day_of_year, delivery_date, daily_hdd, cumulative_hdd
+    FROM {SBX_SCHEMA}.asia_hdd_season_history
+    ORDER BY region, season_start_year, delivery_date
+    """
+    df = run_query(sql)
+    df["season_start_year"] = pd.to_numeric(df["season_start_year"], errors="coerce").astype("Int64")
+    df["day_of_year"] = pd.to_numeric(df["day_of_year"], errors="coerce").astype("Int64")
+    df["daily_hdd"] = pd.to_numeric(df["daily_hdd"], errors="coerce")
+    df["cumulative_hdd"] = pd.to_numeric(df["cumulative_hdd"], errors="coerce")
+    df["delivery_date"] = pd.to_datetime(df["delivery_date"], errors="coerce")
     return df
 
 

@@ -10,6 +10,8 @@ the selection changes (color follows the entity, not its rank in the list).
 """
 from __future__ import annotations
 
+import pandas as pd
+
 from _style import CATEGORICAL, STORM_RAMP
 
 
@@ -31,8 +33,41 @@ def _assign_categorical_colors(names, priority: list[str] = ()) -> dict[str, str
 HDD_BASE_TEMP = 18.0       # °C — Heating Degree Day base
 SEASON_START_MONTH = 10    # HDD season starts October
 SEASON_START_DAY = 1
+SEASON_START_DOY = 274     # Oct 1 day-of-year (non-leap); season runs [274..365] + [1..90]
+SEASON_END_DOY = 90        # Mar 31 day-of-year (non-leap)
 HIST_START_YEAR = 2000
 HIST_END_YEAR = 2025
+
+# How many prior completed winters to draw as overlay lines vs. how many to
+# pool for the coldest/warmest rank badge — overlay stays readable, rank pool
+# gives a more meaningful "Nth coldest of last N years" than just 3 datapoints.
+HDD_OVERLAY_YEARS = 3
+HDD_RANK_POOL_YEARS = 10
+
+
+def hdd_season_start_year(dt) -> int:
+    """Oct-1 season-start year containing calendar date dt (e.g. Jan 2026 -> 2025)."""
+    ts = pd.Timestamp(dt)
+    return ts.year if ts.month >= SEASON_START_MONTH else ts.year - 1
+
+
+def hdd_season_label(start_year: int) -> str:
+    """'2024-25' style label for the winter starting Oct 1 of start_year."""
+    return f"{int(start_year)}-{str(int(start_year) + 1)[-2:]}"
+
+
+def hdd_season_day_index(day_of_year: int) -> int:
+    """Days elapsed since Oct 1 for a day_of_year inside the HDD season window."""
+    doy = int(day_of_year)
+    return doy - SEASON_START_DOY if doy >= SEASON_START_DOY else doy + (365 - SEASON_START_DOY)
+
+
+def is_in_hdd_season(dt=None) -> bool:
+    """True if dt (default: today) falls within the Oct1-Mar31 HDD season."""
+    ts = pd.Timestamp(dt) if dt is not None else pd.Timestamp.today()
+    doy = ts.dayofyear
+    return doy >= SEASON_START_DOY or doy <= SEASON_END_DOY
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SOURCE TABLES (sandbox — populated by lpg_desk_refresh.py)
@@ -74,6 +109,11 @@ PADD_COLORS: dict[str, str] = dict(zip(PADD_REGIONS.keys(), CATEGORICAL))
 
 US_LAT_MIN, US_LAT_MAX = 24.0, 50.0
 US_LON_MIN, US_LON_MAX = -125.0, -65.0
+
+# Prior-winter overlay lines share one neutral gray ramp (oldest -> most
+# recent) across every HDD chart, so they read as "history" and never compete
+# with the categorical PADD/region color used for the current season.
+HDD_HISTORY_COLORS = ["#d8d7d0", "#a3a299", "#6f6d66"]
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2: ASIA HDD — Japan, South Korea, China (North, East, South)
