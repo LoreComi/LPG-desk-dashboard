@@ -113,7 +113,7 @@ US_LON_MIN, US_LON_MAX = -125.0, -65.0
 # Prior-winter overlay lines share one neutral gray ramp (oldest -> most
 # recent) across every HDD chart, so they read as "history" and never compete
 # with the categorical PADD/region color used for the current season.
-HDD_HISTORY_COLORS = ["#d8d7d0", "#a3a299", "#6f6d66"]
+HDD_HISTORY_COLORS = ["#3d4250", "#5c6370", "#7e8590"]
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2: ASIA HDD — Japan, South Korea, China (North, East, South)

@@ -1,58 +1,58 @@
 """Shared visual styling — LPG Desk Weather Dashboard.
 
-Design direction: clean, light, high-contrast trading-desk theme (Bloomberg-
-style). Color is assigned by job — categorical for series identity, sequential
-for magnitude, diverging for anomaly polarity, status for alert state — using
-the validated 8-hue default palette (see dataviz skill: references/palette.md).
+Design direction: dark, high-contrast institutional trading-desk theme.
+Inspired by Bloomberg Terminal / Refinitiv Eikon aesthetics. Color is assigned
+by job — categorical for series identity, sequential for magnitude, diverging
+for anomaly polarity, status for alert state.
 Never mix jobs: a category never borrows a status color and vice versa.
 """
 from __future__ import annotations
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DESIGN TOKENS
+# DESIGN TOKENS — DARK INSTITUTIONAL THEME
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Chart / page surfaces
-SURFACE = "#fcfcfb"
-PAGE_PLANE = "#f9f9f7"
-INK_PRIMARY = "#0b0b0b"
-INK_SECONDARY = "#52514e"
-INK_MUTED = "#898781"
-GRIDLINE = "#e1e0d9"
-BASELINE = "#c3c2b7"
-BORDER = "rgba(11,11,11,0.10)"
-BORDER_BRIGHT = "rgba(11,11,11,0.22)"
+SURFACE = "#0f1117"          # deep charcoal chart bg
+PAGE_PLANE = "#0a0c10"       # app background (near-black)
+INK_PRIMARY = "#e8eaed"      # primary text (off-white)
+INK_SECONDARY = "#9aa0a6"    # secondary text (silver)
+INK_MUTED = "#5f6368"        # muted labels (mid-gray)
+GRIDLINE = "#1e2128"         # subtle grid on dark
+BASELINE = "#2d323b"         # zero-line / baseline
+BORDER = "rgba(255,255,255,0.06)"
+BORDER_BRIGHT = "rgba(255,255,255,0.12)"
 
-# Categorical — fixed order, assign in sequence, never cycle past 8
-CAT_BLUE = "#2a78d6"
-CAT_GREEN = "#008300"
-CAT_MAGENTA = "#e87ba4"
-CAT_YELLOW = "#eda100"
-CAT_AQUA = "#1baf7a"
-CAT_ORANGE = "#eb6834"
-CAT_VIOLET = "#4a3aa7"
-CAT_RED = "#e34948"
+# Categorical — tuned for dark backgrounds (brighter, more saturated)
+CAT_BLUE = "#4d9ff7"
+CAT_GREEN = "#34d399"
+CAT_MAGENTA = "#f472b6"
+CAT_YELLOW = "#fbbf24"
+CAT_AQUA = "#22d3ee"
+CAT_ORANGE = "#fb923c"
+CAT_VIOLET = "#a78bfa"
+CAT_RED = "#f87171"
 CATEGORICAL = [CAT_BLUE, CAT_GREEN, CAT_MAGENTA, CAT_YELLOW, CAT_AQUA, CAT_ORANGE, CAT_VIOLET, CAT_RED]
 
-# Sequential (magnitude) — single hue, light -> dark
-SEQ_BLUE = ["#cde2fb", "#9ec5f4", "#5598e7", "#2a78d6", "#184f95", "#0d366b"]
+# Sequential (magnitude) — single hue, dark bg optimized
+SEQ_BLUE = ["#1e3a5f", "#2563a8", "#3b82f6", "#60a5fa", "#93c5fd", "#dbeafe"]
 
-# Diverging (polarity) — blue (wet/positive) <-> red (dry/negative), neutral gray mid
-DIV_NEG = "#e34948"       # dry / below normal
-DIV_MID = "#f0efec"
-DIV_POS = "#2a78d6"       # wet / above normal
+# Diverging (polarity) — blue (wet/positive) <-> red (dry/negative)
+DIV_NEG = "#f87171"       # dry / below normal
+DIV_MID = "#1e2128"
+DIV_POS = "#4d9ff7"       # wet / above normal
 
-# Status — fixed, reserved, never reused for series identity
-STATUS_GOOD = "#0ca30c"
-STATUS_WARNING = "#fab219"
-STATUS_SERIOUS = "#ec835a"
-STATUS_CRITICAL = "#d03b3b"
+# Status — vibrant on dark, never reused for series identity
+STATUS_GOOD = "#34d399"
+STATUS_WARNING = "#fbbf24"
+STATUS_SERIOUS = "#fb923c"
+STATUS_CRITICAL = "#ef4444"
 
 # Ordinal storm-severity ramp (TD -> Cat 5): one hue family, monotone lightness
 STORM_RAMP = {
-    "TD": "#c3c2b7", "TS": "#8a97ad",
-    "Cat 1": "#f2a6a5", "Cat 2": "#ea7d7c", "Cat 3": CAT_RED,
-    "Cat 4": "#b83433", "Cat 5": "#7a2221",
+    "TD": "#5f6368", "TS": "#94a3b8",
+    "Cat 1": "#fca5a5", "Cat 2": "#f87171", "Cat 3": CAT_RED,
+    "Cat 4": "#dc2626", "Cat 5": "#991b1b",
 }
 
 
@@ -248,7 +248,7 @@ PLOTLY_LAYOUT = dict(
     font=dict(family="Inter, sans-serif", color=INK_PRIMARY, size=12),
     margin=dict(l=55, r=20, t=50, b=70),
     legend=dict(
-        bgcolor="rgba(255,255,255,0.92)",
+        bgcolor="rgba(22,25,32,0.92)",
         bordercolor=GRIDLINE,
         borderwidth=1,
         font=dict(size=11, color=INK_SECONDARY),
@@ -268,14 +268,15 @@ PLOTLY_LAYOUT = dict(
     ),
 )
 
-# Geo (map) chrome — light theme equivalent for Scattergeo charts
+# Geo (map) chrome — dark theme for Scattergeo charts
 GEO_LAYOUT = dict(
     projection_type="natural earth",
-    showland=True, landcolor="#eef0ee",
-    showocean=True, oceancolor="#e4edf7",
-    showcountries=True, countrycolor="#c3c2b7",
+    showland=True, landcolor="#1a1d24",
+    showocean=True, oceancolor="#0d1117",
+    showcountries=True, countrycolor="#2d323b",
     showcoastlines=True, coastlinecolor=INK_MUTED,
     showlakes=False,
     showframe=False,
     resolution=50,
+    bgcolor="rgba(0,0,0,0)",
 )

@@ -235,7 +235,7 @@ def render_asia_hdd():
 # ══════════════════════════════════════════════════════════════════════════════
 def render_india_precip():
     st.markdown("#### INDIA PRECIPITATION ANOMALY")
-    st.caption("Precipitation vs 2000–2024 ERA5 day-of-year climatology, actual + 14-day forecast.")
+    st.caption("Precipitation vs ERA5 day-of-year climatology, actual + 14-day forecast.")
 
     try:
         anom_df = load_india_precip_anomaly()
@@ -247,11 +247,25 @@ def render_india_precip():
         st.info("No India precipitation data available.")
         return
 
+    # KPI cards: show latest actual precip (mm) or deviation % if available
     kpi_cols = st.columns(len(INDIA_SUBREGIONS))
-    latest = anom_df.sort_values("delivery_date").groupby("subregion").last().reset_index()
+    latest = anom_df[anom_df["precip_actual_mm"].notna()].sort_values("delivery_date").groupby("subregion").last().reset_index()
     for i, (_, row) in enumerate(latest.iterrows()):
         with kpi_cols[i % len(kpi_cols)]:
-            st.markdown(kpi_card(row["subregion"], row["deviation_pct"], "%"), unsafe_allow_html=True)
+            dev = row.get("deviation_pct")
+            if dev is not None and not np.isnan(dev):
+                st.markdown(kpi_card(row["subregion"], dev, "%"), unsafe_allow_html=True)
+            else:
+                # Show raw precip when no climatology baseline available
+                val = row.get("precip_actual_mm", 0)
+                st.markdown(raw_kpi_card(row["subregion"], f"{val:.1f} mm/d", "kpi-card-neutral"), unsafe_allow_html=True)
+
+    # Note when deviation is unavailable
+    if anom_df["deviation_pct"].isna().all():
+        st.markdown(
+            status_banner("📊", "Anomaly % unavailable — climatology baseline still building (< 1 year of ERA5 history).", "warning"),
+            unsafe_allow_html=True,
+        )
 
     st.divider()
 
@@ -445,16 +459,43 @@ def render_nafrica_wind():
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN LAYOUT
 # ══════════════════════════════════════════════════════════════════════════════
-st.title("⛽ LPG Desk — Weather Intelligence")
+from datetime import datetime, timezone
+
+_now_utc = datetime.now(timezone.utc)
+_refresh_hour = _now_utc.strftime("%H:%M UTC")
+_refresh_date = _now_utc.strftime("%d %b %Y")
+
+# Professional branded header
+st.markdown(f"""
+<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;">
+    <div>
+        <span style="font-size:1.7rem; font-weight:800; letter-spacing:-0.03em; color:var(--text-primary);">
+            LPG Desk</span>
+        <span style="font-size:1.7rem; font-weight:300; letter-spacing:-0.03em; color:var(--text-muted); margin-left:8px;">
+            Weather Intelligence</span>
+    </div>
+    <div style="display:flex; align-items:center; gap:12px;">
+        <span style="display:inline-flex; align-items:center; gap:6px; padding:4px 12px;
+            background:rgba(52,211,153,0.1); border:1px solid rgba(52,211,153,0.25);
+            border-radius:999px; font-size:0.72rem; font-weight:600; color:#34d399;">
+            <span style="width:6px;height:6px;background:#34d399;border-radius:50%;display:inline-block;"></span>
+            LIVE
+        </span>
+        <span style="font-size:0.72rem; color:var(--text-muted); font-family:'JetBrains Mono',monospace;">
+            {_refresh_date} &middot; {_refresh_hour}
+        </span>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "🇺🇸 US HDD",
-    "🇯🇵 Asia HDD",
-    "🇮🇳 India Precip",
-    "🇵🇦 Gatun Lake",
-    "🏭 PADD 3 Coastal",
-    "🌀 Hurricanes",
-    "💨 N.Africa Wind",
+    "US HDD",
+    "Asia HDD",
+    "India Precip",
+    "Gatun Lake",
+    "PADD 3 Coastal",
+    "Hurricanes",
+    "N.Africa Wind",
 ])
 
 with tab1:

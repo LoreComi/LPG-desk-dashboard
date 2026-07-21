@@ -20,7 +20,7 @@ from _config import (
     HDD_HISTORY_COLORS, HDD_OVERLAY_YEARS, hdd_season_label,
 )
 from _style import (
-    PLOTLY_LAYOUT, GEO_LAYOUT, INK_MUTED, GRIDLINE,
+    PLOTLY_LAYOUT, GEO_LAYOUT, INK_PRIMARY, INK_SECONDARY, INK_MUTED, GRIDLINE,
     DIV_POS, DIV_NEG, STATUS_WARNING, STATUS_CRITICAL,
     STORM_RAMP, CAT_ORANGE,
 )
@@ -231,17 +231,34 @@ def make_india_precip_timeseries(df: pd.DataFrame) -> go.Figure:
 
 
 def make_india_precip_deviation_chart(df: pd.DataFrame) -> go.Figure:
-    """Diverging bar of latest precipitation deviation (%) by subregion."""
-    fig = _base_fig("Precipitation Deviation vs Normal (%)", height=300)
+    """Diverging bar of latest precipitation deviation (%) by subregion.
+    
+    Falls back to a daily precipitation bar chart when deviation is unavailable
+    (climatology baseline still building).
+    """
+    latest = df[df["precip_actual_mm"].notna()].sort_values("delivery_date").groupby("subregion").last().reset_index()
 
-    latest = df.sort_values("delivery_date").groupby("subregion").last().reset_index()
-    fig.add_trace(go.Bar(
-        x=latest["subregion"], y=latest["deviation_pct"],
-        marker_color=[DIV_POS if v >= 0 else DIV_NEG for v in latest["deviation_pct"]],
-        showlegend=False,
-    ))
-    fig.add_hline(y=0, line_dash="dash", line_color=INK_MUTED)
-    fig.update_yaxes(title_text="Deviation (%)")
+    # If deviation is available, show the diverging bar
+    if latest["deviation_pct"].notna().any():
+        fig = _base_fig("Precipitation Deviation vs Normal (%)", height=300)
+        vals = latest["deviation_pct"].fillna(0)
+        fig.add_trace(go.Bar(
+            x=latest["subregion"], y=vals,
+            marker_color=[DIV_POS if v >= 0 else DIV_NEG for v in vals],
+            showlegend=False,
+        ))
+        fig.add_hline(y=0, line_dash="dash", line_color=INK_MUTED)
+        fig.update_yaxes(title_text="Deviation (%)")
+    else:
+        # Fallback: show latest actual precip as bars
+        fig = _base_fig("Latest Daily Precipitation (mm)", height=300)
+        from _config import INDIA_COLORS
+        fig.add_trace(go.Bar(
+            x=latest["subregion"], y=latest["precip_actual_mm"],
+            marker_color=[INDIA_COLORS.get(s, INK_MUTED) for s in latest["subregion"]],
+            showlegend=False,
+        ))
+        fig.update_yaxes(title_text="Precipitation (mm/day)")
     return fig
 
 
@@ -276,10 +293,10 @@ def make_gatun_lake_chart(hist_df: pd.DataFrame, proj_df: pd.DataFrame,
 
     fig.add_hline(y=GATUN_RATE_SURCHARGE_FT, line_color=STATUS_WARNING, line_dash="dash", line_width=1.5,
                   annotation_text=f"{GATUN_RATE_SURCHARGE_FT:.0f} ft — Increased Shipping Rates",
-                  annotation_font_color="#7a5a00", annotation_position="bottom right")
+                  annotation_font_color=STATUS_WARNING, annotation_position="bottom right")
     fig.add_hline(y=GATUN_RESTRICTION_FT, line_color=STATUS_CRITICAL, line_dash="dash", line_width=1.5,
                   annotation_text=f"{GATUN_RESTRICTION_FT:.0f} ft — Significant Restrictions",
-                  annotation_font_color="#7a1f1f", annotation_position="bottom right")
+                  annotation_font_color=STATUS_CRITICAL, annotation_position="bottom right")
 
     fig.update_yaxes(title_text="Lake Level (feet)")
     return fig

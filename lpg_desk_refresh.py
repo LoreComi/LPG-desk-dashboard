@@ -444,7 +444,7 @@ clim_daily AS (
   SELECT {INDIA_CASE} AS subregion, DAYOFYEAR(delivery_start) AS doy, DATE(delivery_start) AS dt, AVG(value) AS precip_mm
   FROM dna_prod_silver.meteomatics.precipitation
   WHERE curve_name = 'precip_24h_mm_ecmwf_era5_p1d' AND model = 'ecmwf-era5'
-    AND YEAR(delivery_start) BETWEEN 2000 AND 2024
+    AND delivery_start < CURRENT_DATE() - INTERVAL 120 DAYS
     AND latitude BETWEEN 8 AND 35 AND longitude BETWEEN 68 AND 90
   GROUP BY {INDIA_CASE}, DAYOFYEAR(delivery_start), DATE(delivery_start)
   HAVING subregion IS NOT NULL
@@ -453,17 +453,17 @@ clim AS (
   SELECT subregion, doy, AVG(precip_mm) AS precip_clim_mm
   FROM clim_daily GROUP BY subregion, doy
 )
-SELECT a.subregion, a.delivery_date, a.precip_actual_mm, c.precip_clim_mm, NULL AS precip_forecast_mm,
-  CASE WHEN c.precip_clim_mm > 0.1
+SELECT a.subregion, a.delivery_date, a.precip_actual_mm, c.precip_clim_mm, CAST(NULL AS DOUBLE) AS precip_forecast_mm,
+  CASE WHEN c.precip_clim_mm IS NOT NULL AND c.precip_clim_mm > 0.1
     THEN ROUND(100.0 * (a.precip_actual_mm - c.precip_clim_mm) / c.precip_clim_mm, 1)
-    ELSE 0.0 END AS deviation_pct
-FROM actuals a JOIN clim c ON a.subregion = c.subregion AND DAYOFYEAR(a.delivery_date) = c.doy
+    ELSE NULL END AS deviation_pct
+FROM actuals a LEFT JOIN clim c ON a.subregion = c.subregion AND DAYOFYEAR(a.delivery_date) = c.doy
 UNION ALL
-SELECT f.subregion, f.delivery_date, NULL AS precip_actual_mm, c.precip_clim_mm, f.precip_forecast_mm,
-  CASE WHEN c.precip_clim_mm > 0.1
+SELECT f.subregion, f.delivery_date, CAST(NULL AS DOUBLE) AS precip_actual_mm, c.precip_clim_mm, f.precip_forecast_mm,
+  CASE WHEN c.precip_clim_mm IS NOT NULL AND c.precip_clim_mm > 0.1
     THEN ROUND(100.0 * (f.precip_forecast_mm - c.precip_clim_mm) / c.precip_clim_mm, 1)
-    ELSE 0.0 END AS deviation_pct
-FROM forecasts f JOIN clim c ON f.subregion = c.subregion AND DAYOFYEAR(f.delivery_date) = c.doy
+    ELSE NULL END AS deviation_pct
+FROM forecasts f LEFT JOIN clim c ON f.subregion = c.subregion AND DAYOFYEAR(f.delivery_date) = c.doy
 ORDER BY subregion, delivery_date
 """)
 print(f"india_precip_anomaly: {spark.sql('SELECT COUNT(*) FROM dna_snbx_weather.lpg_desk.india_precip_anomaly').first()[0]} rows")
