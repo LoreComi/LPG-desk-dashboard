@@ -1,6 +1,6 @@
 """LPG Desk Weather Dashboard — Trader Edition
 
-Tabs:
+Sections (picked from the sidebar):
   1. US HDD by PADD        — Cumulative HDD + run comparison
   2. Asia HDD              — Japan, South Korea, China (N/E/S)
   3. India Precipitation   — Anomaly vs climatology
@@ -51,9 +51,8 @@ from _style import CUSTOM_CSS
 
 st.set_page_config(
     page_title="LPG Desk — Weather Dashboard",
-    page_icon="⛽",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
@@ -83,9 +82,13 @@ def raw_kpi_card(label: str, value_str: str, card_class: str = "kpi-card-neutral
     return f'<div class="kpi-card {card_class}"><div class="kpi-label">{label}</div><div class="kpi-value">{value_str}</div></div>'
 
 
-def status_banner(icon: str, text: str, level: str = "warning") -> str:
-    """Alert banner — icon + label, never color alone (status tokens are reserved)."""
-    return f'<div class="status-banner status-banner-{level}">{icon} {text}</div>'
+_STATUS_TAGS = {"critical": "Alert", "warning": "Notice", "good": "OK"}
+
+
+def status_banner(text: str, level: str = "warning") -> str:
+    """Alert banner — bold text tag + label, never color alone (status tokens are reserved)."""
+    tag = _STATUS_TAGS.get(level, "Notice")
+    return f'<div class="status-banner status-banner-{level}"><span class="status-tag">{tag}</span>{text}</div>'
 
 
 def _ordinal(n: int) -> str:
@@ -155,7 +158,7 @@ def render_us_hdd():
         as_of = next((k["as_of"] for k in padd_kpis.values() if k), None)
         label = hdd_season_label(hdd_season_start_year(as_of)) if as_of is not None else "last winter"
         st.markdown(
-            status_banner("📅", f"Not in HDD seasonality — showing final values for {label} below.", "warning"),
+            status_banner(f"Not in HDD seasonality — showing final values for {label} below.", "warning"),
             unsafe_allow_html=True,
         )
 
@@ -212,7 +215,7 @@ def render_asia_hdd():
         as_of = next((k["as_of"] for k in region_kpis.values() if k), None)
         label = hdd_season_label(hdd_season_start_year(as_of)) if as_of is not None else "last winter"
         st.markdown(
-            status_banner("📅", f"Not in HDD seasonality — showing final values for {label} below.", "warning"),
+            status_banner(f"Not in HDD seasonality — showing final values for {label} below.", "warning"),
             unsafe_allow_html=True,
         )
 
@@ -263,7 +266,7 @@ def render_india_precip():
     # Note when deviation is unavailable
     if anom_df["deviation_pct"].isna().all():
         st.markdown(
-            status_banner("📊", "Anomaly % unavailable — climatology baseline still building (< 1 year of ERA5 history).", "warning"),
+            status_banner("Anomaly % unavailable — climatology baseline still building (< 1 year of ERA5 history).", "warning"),
             unsafe_allow_html=True,
         )
 
@@ -340,8 +343,8 @@ def render_padd3_coastal():
     if not freeze_days.empty:
         cities_at_risk = freeze_days["city"].unique().tolist()
         st.markdown(
-            status_banner("❄", f"FREEZE ALERT: {len(cities_at_risk)} terminal(s) forecast below "
-                                f"{FREEZE_THRESHOLD_C:.0f}°C — {', '.join(cities_at_risk)}", "critical"),
+            status_banner(f"{len(cities_at_risk)} terminal(s) forecast below "
+                          f"{FREEZE_THRESHOLD_C:.0f}°C: {', '.join(cities_at_risk)}", "critical"),
             unsafe_allow_html=True,
         )
 
@@ -383,17 +386,17 @@ def render_hurricanes():
             st.plotly_chart(fig, use_container_width=True)
 
     if not storms:
-        st.markdown(status_banner("✓", "No active tropical cyclones in the US Gulf/Atlantic or "
-                                        "NW Australia region at this time.", "good"), unsafe_allow_html=True)
+        st.markdown(status_banner("No active tropical cyclones in the US Gulf/Atlantic or "
+                                   "NW Australia region at this time.", "good"), unsafe_allow_html=True)
         return
 
     max_wind = max(s["wind_kt"] for s in storms)
     if max_wind >= 64:
-        st.markdown(status_banner("🌀", f"{len(storms)} active storm(s) tracked — strongest at "
-                                        f"{max_wind} kt.", "critical"), unsafe_allow_html=True)
+        st.markdown(status_banner(f"{len(storms)} active storm(s) tracked — strongest at "
+                                   f"{max_wind} kt.", "critical"), unsafe_allow_html=True)
     else:
-        st.markdown(status_banner("🌀", f"{len(storms)} active storm(s) tracked — strongest at "
-                                        f"{max_wind} kt.", "warning"), unsafe_allow_html=True)
+        st.markdown(status_banner(f"{len(storms)} active storm(s) tracked — strongest at "
+                                   f"{max_wind} kt.", "warning"), unsafe_allow_html=True)
 
     st.divider()
     st.markdown("##### ACTIVE STORMS")
@@ -432,8 +435,8 @@ def render_nafrica_wind():
         cities_gale = gale_events["city"].unique().tolist()
         max_pct = int(gale_events.groupby("city")["pct_above_gale"].max().max())
         st.markdown(
-            status_banner("💨", f"GALE RISK: {', '.join(cities_gale)} — up to {max_pct}% of members "
-                                f"forecast ≥{WIND_GALE_MS:.0f} m/s in the next 14 days", "critical"),
+            status_banner(f"{', '.join(cities_gale)} — up to {max_pct}% of members "
+                          f"forecast ≥{WIND_GALE_MS:.0f} m/s in the next 14 days", "critical"),
             unsafe_allow_html=True,
         )
 
@@ -465,7 +468,7 @@ _now_utc = datetime.now(timezone.utc)
 _refresh_hour = _now_utc.strftime("%H:%M UTC")
 _refresh_date = _now_utc.strftime("%d %b %Y")
 
-# Professional branded header
+# Branded header
 st.markdown(f"""
 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;">
     <div>
@@ -476,10 +479,10 @@ st.markdown(f"""
     </div>
     <div style="display:flex; align-items:center; gap:12px;">
         <span style="display:inline-flex; align-items:center; gap:6px; padding:4px 12px;
-            background:rgba(52,211,153,0.1); border:1px solid rgba(52,211,153,0.25);
-            border-radius:999px; font-size:0.72rem; font-weight:600; color:#34d399;">
-            <span style="width:6px;height:6px;background:#34d399;border-radius:50%;display:inline-block;"></span>
-            LIVE
+            background:#e9f7e9; border:1px solid rgba(12,163,12,0.28);
+            border-radius:999px; font-size:0.72rem; font-weight:600; color:#0f5c0f;">
+            <span style="width:6px;height:6px;background:#0ca30c;border-radius:50%;display:inline-block;"></span>
+            Live
         </span>
         <span style="font-size:0.72rem; color:var(--text-muted); font-family:'JetBrains Mono',monospace;">
             {_refresh_date} &middot; {_refresh_hour}
@@ -488,27 +491,20 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "US HDD",
-    "Asia HDD",
-    "India Precip",
-    "Gatun Lake",
-    "PADD 3 Coastal",
-    "Hurricanes",
-    "N.Africa Wind",
-])
+PAGES = {
+    "US HDD": render_us_hdd,
+    "Asia HDD": render_asia_hdd,
+    "India Precipitation": render_india_precip,
+    "Gatun Lake": render_gatun_lake,
+    "PADD 3 Coastal": render_padd3_coastal,
+    "Hurricanes": render_hurricanes,
+    "N. Africa Wind": render_nafrica_wind,
+}
 
-with tab1:
-    render_us_hdd()
-with tab2:
-    render_asia_hdd()
-with tab3:
-    render_india_precip()
-with tab4:
-    render_gatun_lake()
-with tab5:
-    render_padd3_coastal()
-with tab6:
-    render_hurricanes()
-with tab7:
-    render_nafrica_wind()
+with st.sidebar:
+    st.markdown("### Sections")
+    selected_page = st.radio(
+        "Sections", list(PAGES.keys()), label_visibility="collapsed", key="nav_page",
+    )
+
+PAGES[selected_page]()

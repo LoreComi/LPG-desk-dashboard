@@ -1,58 +1,58 @@
 """Shared visual styling — LPG Desk Weather Dashboard.
 
-Design direction: dark, high-contrast institutional trading-desk theme.
-Inspired by Bloomberg Terminal / Refinitiv Eikon aesthetics. Color is assigned
-by job — categorical for series identity, sequential for magnitude, diverging
-for anomaly polarity, status for alert state.
+Design direction: clean, light, high-contrast trading-desk theme. Color is
+assigned by job — categorical for series identity, sequential for magnitude,
+diverging for anomaly polarity, status for alert state — using the validated
+8-hue default palette (see dataviz skill: references/palette.md).
 Never mix jobs: a category never borrows a status color and vice versa.
 """
 from __future__ import annotations
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DESIGN TOKENS — DARK INSTITUTIONAL THEME
+# DESIGN TOKENS
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Chart / page surfaces
-SURFACE = "#0f1117"          # deep charcoal chart bg
-PAGE_PLANE = "#0a0c10"       # app background (near-black)
-INK_PRIMARY = "#e8eaed"      # primary text (off-white)
-INK_SECONDARY = "#9aa0a6"    # secondary text (silver)
-INK_MUTED = "#5f6368"        # muted labels (mid-gray)
-GRIDLINE = "#1e2128"         # subtle grid on dark
-BASELINE = "#2d323b"         # zero-line / baseline
-BORDER = "rgba(255,255,255,0.06)"
-BORDER_BRIGHT = "rgba(255,255,255,0.12)"
+SURFACE = "#ffffff"
+PAGE_PLANE = "#f4f5f4"
+INK_PRIMARY = "#1a1a18"
+INK_SECONDARY = "#54534d"
+INK_MUTED = "#8b897f"
+GRIDLINE = "#e7e6e0"
+BASELINE = "#c9c8bd"
+BORDER = "rgba(20,20,15,0.09)"
+BORDER_BRIGHT = "rgba(20,20,15,0.20)"
 
-# Categorical — tuned for dark backgrounds (brighter, more saturated)
-CAT_BLUE = "#4d9ff7"
-CAT_GREEN = "#34d399"
-CAT_MAGENTA = "#f472b6"
-CAT_YELLOW = "#fbbf24"
-CAT_AQUA = "#22d3ee"
-CAT_ORANGE = "#fb923c"
-CAT_VIOLET = "#a78bfa"
-CAT_RED = "#f87171"
+# Categorical — fixed order, assign in sequence, never cycle past 8
+CAT_BLUE = "#2a78d6"
+CAT_GREEN = "#008300"
+CAT_MAGENTA = "#e87ba4"
+CAT_YELLOW = "#eda100"
+CAT_AQUA = "#1baf7a"
+CAT_ORANGE = "#eb6834"
+CAT_VIOLET = "#4a3aa7"
+CAT_RED = "#e34948"
 CATEGORICAL = [CAT_BLUE, CAT_GREEN, CAT_MAGENTA, CAT_YELLOW, CAT_AQUA, CAT_ORANGE, CAT_VIOLET, CAT_RED]
 
-# Sequential (magnitude) — single hue, dark bg optimized
-SEQ_BLUE = ["#1e3a5f", "#2563a8", "#3b82f6", "#60a5fa", "#93c5fd", "#dbeafe"]
+# Sequential (magnitude) — single hue, light -> dark
+SEQ_BLUE = ["#cde2fb", "#9ec5f4", "#5598e7", "#2a78d6", "#184f95", "#0d366b"]
 
-# Diverging (polarity) — blue (wet/positive) <-> red (dry/negative)
-DIV_NEG = "#f87171"       # dry / below normal
-DIV_MID = "#1e2128"
-DIV_POS = "#4d9ff7"       # wet / above normal
+# Diverging (polarity) — blue (wet/positive) <-> red (dry/negative), neutral gray mid
+DIV_NEG = "#e34948"       # dry / below normal
+DIV_MID = "#f0efec"
+DIV_POS = "#2a78d6"       # wet / above normal
 
-# Status — vibrant on dark, never reused for series identity
-STATUS_GOOD = "#34d399"
-STATUS_WARNING = "#fbbf24"
-STATUS_SERIOUS = "#fb923c"
-STATUS_CRITICAL = "#ef4444"
+# Status — fixed, reserved, never reused for series identity
+STATUS_GOOD = "#0ca30c"
+STATUS_WARNING = "#b8790a"
+STATUS_SERIOUS = "#c85a30"
+STATUS_CRITICAL = "#c22f2f"
 
 # Ordinal storm-severity ramp (TD -> Cat 5): one hue family, monotone lightness
 STORM_RAMP = {
-    "TD": "#5f6368", "TS": "#94a3b8",
-    "Cat 1": "#fca5a5", "Cat 2": "#f87171", "Cat 3": CAT_RED,
-    "Cat 4": "#dc2626", "Cat 5": "#991b1b",
+    "TD": "#c3c2b7", "TS": "#8a97ad",
+    "Cat 1": "#f2a6a5", "Cat 2": "#ea7d7c", "Cat 3": CAT_RED,
+    "Cat 4": "#b83433", "Cat 5": "#7a2221",
 }
 
 
@@ -63,7 +63,7 @@ CUSTOM_CSS = f"""
 :root {{
     --bg-app: {PAGE_PLANE};
     --bg-surface: {SURFACE};
-    --bg-card: #f8f8f6;
+    --bg-card: #fafaf8;
     --border: {BORDER};
     --border-bright: {BORDER_BRIGHT};
     --text-primary: {INK_PRIMARY};
@@ -77,8 +77,8 @@ CUSTOM_CSS = f"""
     --radius-sm: 6px;
     --radius-md: 10px;
     --radius-lg: 14px;
-    --shadow-card: 0 1px 6px rgba(11,11,11,0.06), 0 0 0 1px rgba(11,11,11,0.05);
-    --shadow-pop: 0 6px 24px rgba(11,11,11,0.12);
+    --shadow-card: 0 1px 6px rgba(20,20,15,0.05), 0 0 0 1px rgba(20,20,15,0.04);
+    --shadow-pop: 0 6px 24px rgba(20,20,15,0.10);
 }}
 
 .stApp {{
@@ -90,28 +90,19 @@ CUSTOM_CSS = f"""
 
 h1 {{
     color: var(--text-primary) !important;
-    font-weight: 800 !important;
-    letter-spacing: -0.03em !important;
-    font-size: 1.7rem !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.02em !important;
+    font-size: 1.5rem !important;
     margin-bottom: 0 !important;
-}}
-h1::after {{
-    content: "";
-    display: inline-block;
-    width: 7px; height: 7px;
-    margin-left: 8px;
-    background: var(--accent);
-    border-radius: 2px;
-    vertical-align: 5px;
 }}
 h2, h3 {{ color: var(--text-primary) !important; font-weight: 700 !important; letter-spacing: -0.02em !important; }}
 h4 {{
-    color: var(--text-muted) !important;
+    color: var(--text-secondary) !important;
     font-weight: 700 !important;
-    font-size: 0.68rem !important;
+    font-size: 0.72rem !important;
     text-transform: uppercase;
-    letter-spacing: 0.12em;
-    margin-top: 22px !important;
+    letter-spacing: 0.10em;
+    margin-top: 4px !important;
     margin-bottom: 4px !important;
 }}
 p, .stMarkdown, span, label {{ color: var(--text-primary); }}
@@ -125,27 +116,41 @@ p, .stMarkdown, span, label {{ color: var(--text-primary); }}
     margin-top: 16px !important;
 }}
 
-[data-testid="stTabs"] [data-baseweb="tab-list"] {{
-    background: rgba(11,11,11,0.05);
-    border-radius: var(--radius-lg);
-    padding: 4px;
-    gap: 2px;
+/* Sidebar page navigation */
+[data-testid="stSidebar"] {{
+    background: var(--bg-app);
+    border-right: 1px solid var(--border);
 }}
-[data-testid="stTabs"] button {{
+[data-testid="stSidebar"] h3 {{
+    font-size: 0.68rem !important;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--text-muted) !important;
+    font-weight: 700 !important;
+    margin-bottom: 8px !important;
+}}
+[data-testid="stSidebar"] [data-testid="stRadio"] > div {{ gap: 2px; }}
+[data-testid="stSidebar"] [data-testid="stRadio"] label {{
+    padding: 9px 12px !important;
+    border-radius: var(--radius-md);
+    width: 100%;
+}}
+[data-testid="stSidebar"] [data-testid="stRadio"] label:hover {{
+    background: rgba(20,20,15,0.04);
+}}
+[data-testid="stSidebar"] [data-testid="stRadio"] label p {{
     color: var(--text-secondary) !important;
     font-weight: 500 !important;
-    border-radius: var(--radius-md) !important;
-    background: transparent !important;
-    border: none !important;
+    font-size: 0.92rem !important;
 }}
-[data-testid="stTabs"] button[aria-selected="true"] {{
-    background: var(--bg-surface) !important;
+[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) {{
+    background: var(--bg-surface);
+    box-shadow: var(--shadow-card);
+}}
+[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) p {{
     color: var(--accent) !important;
-    box-shadow: var(--shadow-card) !important;
     font-weight: 600 !important;
 }}
-[data-testid="stTabs"] [data-baseweb="tab-highlight"] {{ background-color: transparent !important; }}
-[data-testid="stTabs"] [data-baseweb="tab-border"] {{ display: none !important; }}
 
 /* KPI cards */
 .kpi-card {{
@@ -191,7 +196,7 @@ p, .stMarkdown, span, label {{ color: var(--text-primary); }}
     font-weight: 600;
     letter-spacing: 0.02em;
     color: var(--text-secondary);
-    background: rgba(11,11,11,0.05);
+    background: rgba(20,20,15,0.05);
     border-radius: 999px;
 }}
 
@@ -204,20 +209,26 @@ p, .stMarkdown, span, label {{ color: var(--text-primary); }}
     margin-bottom: 18px;
 }}
 
-/* Status alert banners — icon + label, never color alone */
+/* Status alert banners — bold text tag + label, never color alone */
 .status-banner {{
     border-radius: var(--radius-md);
     padding: 8px 14px;
-    font-weight: 600;
-    font-size: 0.82rem;
+    font-weight: 500;
+    font-size: 0.85rem;
     display: inline-flex;
     align-items: center;
     gap: 8px;
     margin: 4px 0 10px 0;
 }}
-.status-banner-critical {{ background: #fdecec; color: #7a1f1f; border: 1px solid rgba(208,59,59,0.35); }}
-.status-banner-warning  {{ background: #fef6e6; color: #7a5a00; border: 1px solid rgba(250,178,25,0.45); }}
-.status-banner-good     {{ background: #eafbea; color: #0f5c0f; border: 1px solid rgba(12,163,12,0.30); }}
+.status-tag {{
+    font-weight: 700;
+    text-transform: uppercase;
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+}}
+.status-banner-critical {{ background: #fbeaea; color: #7a1f1f; border: 1px solid rgba(194,47,47,0.30); }}
+.status-banner-warning  {{ background: #fbf1e2; color: #7a5a00; border: 1px solid rgba(184,121,10,0.35); }}
+.status-banner-good     {{ background: #e9f7e9; color: #0f5c0f; border: 1px solid rgba(12,163,12,0.28); }}
 
 [data-testid="stDataFrame"] {{
     border-radius: var(--radius-md) !important;
@@ -248,7 +259,7 @@ PLOTLY_LAYOUT = dict(
     font=dict(family="Inter, sans-serif", color=INK_PRIMARY, size=12),
     margin=dict(l=55, r=20, t=50, b=70),
     legend=dict(
-        bgcolor="rgba(22,25,32,0.92)",
+        bgcolor="rgba(255,255,255,0.92)",
         bordercolor=GRIDLINE,
         borderwidth=1,
         font=dict(size=11, color=INK_SECONDARY),
@@ -268,15 +279,14 @@ PLOTLY_LAYOUT = dict(
     ),
 )
 
-# Geo (map) chrome — dark theme for Scattergeo charts
+# Geo (map) chrome — light theme equivalent for Scattergeo charts
 GEO_LAYOUT = dict(
     projection_type="natural earth",
-    showland=True, landcolor="#1a1d24",
-    showocean=True, oceancolor="#0d1117",
-    showcountries=True, countrycolor="#2d323b",
+    showland=True, landcolor="#eef0ee",
+    showocean=True, oceancolor="#e4edf7",
+    showcountries=True, countrycolor="#c3c2b7",
     showcoastlines=True, coastlinecolor=INK_MUTED,
     showlakes=False,
     showframe=False,
     resolution=50,
-    bgcolor="rgba(0,0,0,0)",
 )
