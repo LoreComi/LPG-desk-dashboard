@@ -55,6 +55,10 @@ from datetime import datetime
 print(f"Refresh started: {datetime.now()}")
 spark.sql("CREATE SCHEMA IF NOT EXISTS dna_snbx_weather.lpg_desk")
 
+# Re-apply USE CATALOG grant for the app SP — gets revoked by governance jobs
+spark.sql("GRANT USE CATALOG ON CATALOG dna_snbx_weather TO `34723e4c-6c84-42cb-8014-16478ddd2599`")
+print("USE CATALOG grant re-applied for LPG app SP")
+
 # COMMAND ----------
 
 # DBTITLE 1,Lookup tables (mirror _config.py)
