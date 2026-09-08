@@ -199,7 +199,7 @@ INDIA_SUBREGIONS: dict[str, dict] = {
 INDIA_COLORS: dict[str, str] = dict(zip(INDIA_SUBREGIONS.keys(), CATEGORICAL))
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 4: GATUN LAKE — live ACP feed + El Nino analog years
+# TAB 4: PANAMA CANAL — Gatun Lake level, ENSO forecasts, watershed precipitation
 # ══════════════════════════════════════════════════════════════════════════════
 # Source: Panama Canal Authority (evtms-rpts.pancanal.com) — fetched live by
 # the app, no sandbox table needed. Analog years are the strongest historical
@@ -208,9 +208,77 @@ INDIA_COLORS: dict[str, str] = dict(zip(INDIA_SUBREGIONS.keys(), CATEGORICAL))
 GATUN_HIST_URL = "https://evtms-rpts.pancanal.com/eng/h2o/Download_Gatun_Lake_Water_Level_History.csv"
 GATUN_PROJECTION_URL = "https://evtms-rpts.pancanal.com/eng/h2o/Gatun_Water_Level_Projection.csv"
 GATUN_ANALOG_YEARS = [1997, 2015, 2023]
-GATUN_ANALOG_COLORS = dict(zip(GATUN_ANALOG_YEARS, CATEGORICAL[1:]))
 GATUN_RATE_SURCHARGE_FT = 85.0   # increased shipping rates threshold
 GATUN_RESTRICTION_FT = 82.0      # significant draft restrictions threshold
+
+# ─── Forecast methods (ported from gatun_lake_analog_years.py) ────────────────
+# Three ways to project past the ACP's official forecast horizon:
+#   analog     — replay each chosen El Nino year's level *change* from the
+#                equivalent point, applied to the official forecast's last level
+#   enso_index — fit a per-calendar-month regression of daily level change on
+#                the Nino3.4 index across the full record, then roll forward
+#                under an assumed index scenario
+#   composite  — mean trajectory of the strongest El Nino events on record
+# All three are anchored on the official forecast's final level, so they read
+# as extensions of the ACP curve rather than competing absolute forecasts.
+GATUN_FORECAST_METHODS = ["Analog years", "ENSO index model", "ENSO composite"]
+
+GATUN_EXTRA_LAG_DAYS = 350       # days drawn past the official forecast's end
+GATUN_ENSO_HORIZON_DAYS = 365    # length of the ENSO-model forecast
+GATUN_ENSO_INDEX_BAND = 0.5      # +/- Nino3.4 band drawn as an uncertainty ribbon
+GATUN_ENSO_DECAY_MONTHS = 5      # months over which the index decays to neutral after January
+GATUN_ENSO_MIN_SAMPLES = 30      # min overlapping days before a month gets its own slope
+
+# Strongest Sep-Jan mean Nino3.4 events on record (1981-2025): 2015 (2.40),
+# 1997 (2.10), 1982 (1.89), 2023 (1.79). The composite represents the strongest
+# *observed* historical response, not a fit to any particular index level.
+GATUN_COMPOSITE_YEARS = [1982, 1997, 2015, 2023]
+
+# Which years are offered as analogs is derived live from the ONI record rather
+# than hardcoded (see _data.py: list_el_nino_onset_years), so the list keeps
+# itself current as new events land. An "onset year" Y means the event that
+# developed Sep Y - Jan Y+1 — matching how ANALOG_YEARS above are labeled, and
+# how the overlay is built (Y-1's calendar shifted onto today's).
+GATUN_EL_NINO_ONI_THRESHOLD = 0.5   # Sep-Jan mean ONI at or above this = El Nino
+GATUN_ANALOG_HISTORY_START = 1965   # first year in the ACP level archive
+# Fallback list if CPC is unreachable — the moderate-or-stronger events since
+# the ACP archive begins, so the picker still works offline.
+GATUN_FALLBACK_ANALOG_YEARS = [1965, 1968, 1972, 1976, 1982, 1986, 1987, 1991,
+                               1994, 1997, 2002, 2004, 2006, 2009, 2014, 2015,
+                               2018, 2023]
+
+# Analog curves are history, not entities — they share one muted gray-to-blue
+# ramp so they never compete with the categorical blue/red used for observed and
+# official forecast. Assigned per-position at draw time (see _charts.py), so
+# adding a year in the UI can't reshuffle the years already on screen.
+GATUN_ANALOG_RAMP = ["#b9b7ac", "#9c9fae", "#7f93c4", "#5f7fb8", "#3f6aa8", "#27548f"]
+
+# NOAA CPC Oceanic Nino Index — 3-month running mean Nino3.4 SST anomaly,
+# 1950-present, refreshed monthly. Used both to fit the ENSO sensitivity above
+# and to default the scenario slider to the latest observed value.
+CPC_ONI_URL = "https://www.cpc.ncep.noaa.gov/data/indices/oni.ascii.txt"
+# CPC labels each overlapping 3-month season by the year of its *centre* month.
+ONI_SEASON_CENTRE_MONTH = {
+    "DJF": 1, "JFM": 2, "FMA": 3, "MAM": 4, "AMJ": 5, "MJJ": 6,
+    "JJA": 7, "JAS": 8, "ASO": 9, "SON": 10, "OND": 11, "NDJ": 12,
+}
+
+# ─── Panama Canal watershed precipitation ─────────────────────────────────────
+# The canal's water balance is rain-fed: Gatun Lake plus the Alhajuela/Chagres
+# reservoir upstream. The true catchment is roughly 8.9-9.6N / 79.2-80.2W;
+# the box below is rounded outward onto the 0.5-degree Meteomatics grid so the
+# area-average actually has grid points to average over.
+PANAMA_CATCHMENT = {"lat_min": 8.5, "lat_max": 10.0, "lon_min": -80.5, "lon_max": -79.0}
+
+# Windows the "wetter/drier than normal" verdict is computed over. The 30-day
+# lookback is what has already landed in the lake; the forecast window is what
+# ECMWF-ENS says is coming.
+PANAMA_PRECIP_LOOKBACK_DAYS = 30
+PANAMA_PRECIP_FORECAST_DAYS = 14
+# Departures inside +/- this share of normal read as "near normal" rather than
+# wet/dry — daily tropical rainfall is noisy enough that a 10% swing over a
+# 2-week window carries no signal for the lake.
+PANAMA_PRECIP_NEAR_NORMAL_PCT = 10.0
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 5: PADD 3 COASTAL TEMPERATURES

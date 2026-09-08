@@ -15,6 +15,7 @@ import os
 import re
 from datetime import datetime, timedelta
 
+import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
@@ -22,6 +23,13 @@ import streamlit as st
 from _config import (
     SBX_SCHEMA,
     GATUN_HIST_URL, GATUN_PROJECTION_URL, GATUN_ANALOG_YEARS,
+    GATUN_EXTRA_LAG_DAYS, GATUN_COMPOSITE_YEARS,
+    GATUN_ENSO_HORIZON_DAYS, GATUN_ENSO_INDEX_BAND, GATUN_ENSO_DECAY_MONTHS,
+    GATUN_ENSO_MIN_SAMPLES,
+    GATUN_EL_NINO_ONI_THRESHOLD, GATUN_ANALOG_HISTORY_START,
+    GATUN_FALLBACK_ANALOG_YEARS,
+    CPC_ONI_URL, ONI_SEASON_CENTRE_MONTH,
+    PANAMA_PRECIP_LOOKBACK_DAYS, PANAMA_PRECIP_FORECAST_DAYS,
     HURRICANE_BASINS,
     HDD_RANK_POOL_YEARS, hdd_season_day_index,
 )
@@ -344,41 +352,363 @@ def load_gatun_lake_levels() -> tuple[pd.DataFrame, pd.DataFrame]:
     return hist_df, proj_df
 
 
+def _gatun_window(proj_df: pd.DataFrame, extra_lag_days: int = GATUN_EXTRA_LAG_DAYS
+                  ) -> tuple[pd.Timestamp, int, pd.Timestamp]:
+    """Common (window_start, window_days, forecast_end) for every analog overlay.
+
+    The window opens one year back from today and closes `extra_lag_days` past
+    the official forecast's last date, so a shifted analog year covers both the
+    observed stretch already on the chart and the space the extension needs.
+    """
+    window_start = pd.Timestamp.today().normalize() - pd.DateOffset(days=365)
+    forecast_end = proj_df['date'].max() if not proj_df.empty else pd.Timestamp.today().normalize()
+    window_end = forecast_end + pd.Timedelta(days=extra_lag_days)
+    return window_start, (window_end - window_start).days, forecast_end
+
+
+def _gatun_analog_series(hist_df: pd.DataFrame, analog_year: int,
+                         window_start: pd.Timestamp, window_days: int) -> pd.DataFrame:
+    """One analog year's observed levels, time-shifted onto today's calendar.
+
+    `analog_year` Y is the year the event *developed* in: the slice runs from
+    window_start's month/day in Y-1 forward across `window_days`, then is shifted
+    so that start lands exactly on window_start. Every analog therefore shares
+    one calendar x-axis with the current observed/forecast window.
+
+    Returns columns (display_date, level_ft); empty if the archive doesn't
+    reach back that far.
+    """
+    start_year = analog_year - 1
+    try:
+        analog_start = window_start.replace(year=start_year)
+    except ValueError:
+        # window_start is Feb 29 and start_year isn't a leap year
+        analog_start = window_start.replace(year=start_year, day=28)
+    analog_end = analog_start + pd.Timedelta(days=window_days)
+
+    mask = (hist_df['date'] >= analog_start) & (hist_df['date'] <= analog_end)
+    sub = hist_df.loc[mask].copy()
+    if sub.empty:
+        return sub
+    sub['display_date'] = sub['date'] + (window_start - analog_start)
+    return sub[['display_date', 'level_ft']].sort_values('display_date')
+
+
+def _anchor_to_forecast_end(sub: pd.DataFrame, forecast_end: pd.Timestamp,
+                            forecast_end_level: float) -> pd.Series | None:
+    """Re-express an analog's post-forecast stretch as a delta off the ACP curve.
+
+    Takes the analog's level *change* from the point matching the official
+    forecast's last date onward and applies it to the official forecast's last
+    level, so the extension continues the ACP line instead of jumping to the
+    analog year's absolute level (which reflects a different starting storage).
+    """
+    if sub.empty:
+        return None
+    anchor_level = sub.loc[(sub['display_date'] - forecast_end).abs().idxmin(), 'level_ft']
+    post = sub[sub['display_date'] >= forecast_end]
+    if post.empty:
+        return None
+    return pd.Series((forecast_end_level + (post['level_ft'] - anchor_level)).values,
+                     index=post['display_date'].values)
+
+
+def _forecast_end_level(hist_df: pd.DataFrame, proj_df: pd.DataFrame) -> float:
+    """Level the extension forecasts start from — the ACP forecast's last point,
+    or the latest observation when no official projection is published."""
+    if not proj_df.empty:
+        return float(proj_df.loc[proj_df['date'].idxmax(), 'level_ft'])
+    return float(hist_df.sort_values('date')['level_ft'].iloc[-1])
+
+
 def build_gatun_analog_overlays(hist_df: pd.DataFrame, proj_df: pd.DataFrame,
                                  analog_years: list[int] = GATUN_ANALOG_YEARS) -> dict[int, pd.DataFrame]:
-    """Time-shift each analog year's observed trajectory onto today's calendar.
-
-    For an analog year Y, pulls Y-1's data starting from today's month/day one
-    year back through the same span covered by hist+forecast, then shifts it
-    forward so that start lands exactly on today — landing all analog curves
-    on the same x-axis as the current observed/forecast window.
-    """
+    """Time-shift each analog year's observed trajectory onto today's calendar."""
     if hist_df.empty:
         return {}
-
-    window_start = pd.Timestamp.today().normalize() - pd.DateOffset(days=365)
-    forecast_end = proj_df['date'].max() if not proj_df.empty else pd.Timestamp.today()
-    window_end = forecast_end + pd.Timedelta(days=350)
-    window_days = (window_end - window_start).days
-
+    window_start, window_days, _ = _gatun_window(proj_df)
     overlays = {}
     for year in analog_years:
-        start_year = year - 1
-        try:
-            analog_start = window_start.replace(year=start_year)
-        except ValueError:
-            analog_start = window_start.replace(year=start_year, day=28)
-        analog_end = analog_start + pd.Timedelta(days=window_days)
-
-        mask = (hist_df['date'] >= analog_start) & (hist_df['date'] <= analog_end)
-        sub = hist_df.loc[mask].copy()
-        if sub.empty:
-            continue
-        shift = window_start - analog_start
-        sub['display_date'] = sub['date'] + shift
-        overlays[year] = sub[['display_date', 'level_ft']].rename(columns={'display_date': 'date'})
-
+        sub = _gatun_analog_series(hist_df, year, window_start, window_days)
+        if not sub.empty:
+            overlays[year] = sub.rename(columns={'display_date': 'date'})
     return overlays
+
+
+def build_gatun_analog_extension(hist_df: pd.DataFrame, proj_df: pd.DataFrame,
+                                  analog_years: list[int] = GATUN_ANALOG_YEARS,
+                                  extra_lag_days: int = GATUN_EXTRA_LAG_DAYS
+                                  ) -> tuple[dict[int, pd.Series], pd.Series | None]:
+    """Extend the official forecast past its horizon using each analog's own path.
+
+    Returns ({year: level series indexed by date}, mean across those years).
+    The mean is the headline line; the per-year curves show the spread it hides.
+    """
+    if hist_df.empty:
+        return {}, None
+
+    window_start, window_days, forecast_end = _gatun_window(proj_df, extra_lag_days)
+    end_level = _forecast_end_level(hist_df, proj_df)
+
+    extensions = {}
+    for year in analog_years:
+        sub = _gatun_analog_series(hist_df, year, window_start, window_days)
+        series = _anchor_to_forecast_end(sub, forecast_end, end_level)
+        if series is not None:
+            extensions[year] = series
+
+    if not extensions:
+        return {}, None
+    mean_series = pd.concat(extensions.values(), axis=1).mean(axis=1, skipna=True)
+    return extensions, mean_series
+
+
+def build_gatun_composite_forecast(hist_df: pd.DataFrame, proj_df: pd.DataFrame,
+                                    composite_years: list[int] = GATUN_COMPOSITE_YEARS,
+                                    horizon_days: int = GATUN_ENSO_HORIZON_DAYS
+                                    ) -> tuple[dict[int, pd.Series], pd.Series | None, pd.Series | None]:
+    """Mean post-forecast trajectory of the strongest El Nino events on record.
+
+    The alternative to the regression model below: rather than fitting a
+    continuous slope against Nino3.4 — which historically explains very little
+    of Gatun's month-to-month change, and would have to be extrapolated past any
+    observed index value — this just averages what the lake actually did in the
+    strongest events. Returns ({year: series}, mean, std across years).
+    """
+    if hist_df.empty:
+        return {}, None, None
+    extensions, mean_series = build_gatun_analog_extension(
+        hist_df, proj_df, composite_years, extra_lag_days=horizon_days)
+    if not extensions:
+        return {}, None, None
+    std_series = pd.concat(extensions.values(), axis=1).std(axis=1, skipna=True)
+    return extensions, mean_series, std_series
+
+
+# ─── ENSO index model ────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def load_oni_monthly() -> pd.DataFrame:
+    """NOAA CPC Oceanic Nino Index — monthly 3-month-running-mean Nino3.4 anomaly.
+
+    Source: cpc.ncep.noaa.gov/data/indices/oni.ascii.txt (1950-present, updated
+    monthly). Columns SEAS/YR/TOTAL/ANOM, one row per overlapping 3-month season;
+    CPC labels each season by the year of its centre month, so 'DJF 1998' is
+    Dec 1997-Feb 1998 centred on Jan 1998. Returns (date, oni) at month starts.
+    """
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    resp = requests.get(CPC_ONI_URL, timeout=30, verify=False,
+                        headers={"User-Agent": "Mozilla/5.0 (compatible; LPG-Desk-Dashboard/1.0)"})
+    resp.raise_for_status()
+
+    rows = []
+    for line in resp.text.splitlines():
+        parts = line.split()
+        if len(parts) != 4 or parts[0] not in ONI_SEASON_CENTRE_MONTH:
+            continue  # header and any malformed line
+        try:
+            year, oni = int(parts[1]), float(parts[3])
+        except ValueError:
+            continue
+        rows.append((pd.Timestamp(year=year, month=ONI_SEASON_CENTRE_MONTH[parts[0]], day=1), oni))
+
+    if not rows:
+        raise RuntimeError("CPC ONI file returned no parseable rows")
+    return pd.DataFrame(rows, columns=['date', 'oni']).sort_values('date').reset_index(drop=True)
+
+
+def oni_to_daily(oni_df: pd.DataFrame) -> pd.DataFrame:
+    """Interpolate the monthly ONI onto a daily index for the sensitivity fit.
+
+    The regression below pairs each day's lake-level change with that day's index
+    value; ONI is a 3-month running mean, so linear interpolation between month
+    centres adds no false precision — it just avoids 12 step discontinuities a
+    year that would otherwise land arbitrarily in the monthly buckets.
+    """
+    if oni_df.empty:
+        return pd.DataFrame(columns=['date', 'index'])
+    s = (oni_df.set_index('date')['oni']
+         .resample('D').interpolate('time'))
+    return pd.DataFrame({'date': s.index, 'index': s.values})
+
+
+def list_el_nino_onset_years(oni_df: pd.DataFrame,
+                             threshold: float = GATUN_EL_NINO_ONI_THRESHOLD,
+                             first_year: int = GATUN_ANALOG_HISTORY_START) -> dict[int, float]:
+    """El Nino onset years covered by the ACP archive, with their Sep-Jan mean ONI.
+
+    An onset year Y is scored over Sep Y - Jan Y+1 — the window that matters for
+    Panama, since that's when a developing El Nino suppresses the rains feeding
+    the lake ahead of the following dry season. Returns {year: mean ONI},
+    strongest first, which is also the order the analog picker offers them in.
+    """
+    if oni_df.empty:
+        return {}
+    m = oni_df.copy()
+    # Label Sep-Dec with their own year and Jan with the previous one, so a
+    # single groupby collects each event's whole Sep-Jan window.
+    m['onset_year'] = m['date'].dt.year.where(m['date'].dt.month >= 9,
+                                              m['date'].dt.year - 1)
+    m = m[m['date'].dt.month.isin([9, 10, 11, 12, 1])]
+
+    scores = {}
+    for year, grp in m.groupby('onset_year'):
+        if year < first_year or len(grp) < 5:   # need the full Sep-Jan window
+            continue
+        mean_oni = float(grp['oni'].mean())
+        if mean_oni >= threshold:
+            scores[int(year)] = round(mean_oni, 2)
+    return dict(sorted(scores.items(), key=lambda kv: kv[1], reverse=True))
+
+
+def fit_gatun_enso_sensitivity(hist_df: pd.DataFrame, nino_daily: pd.DataFrame,
+                                min_samples: int = GATUN_ENSO_MIN_SAMPLES) -> dict[int, tuple[float, float]]:
+    """Per-calendar-month fit of daily lake-level change against the Nino3.4 index.
+
+    For each month, regresses level_change = a + b * index across every
+    historical day where both series exist. `b` is that month's ENSO sensitivity
+    (feet of daily change per unit of index) and `a` its ENSO-neutral baseline.
+    Months with too few overlapping days keep their mean change and a zero slope,
+    so a thin month contributes climatology rather than a noisy trend.
+    """
+    lake = hist_df.sort_values('date').copy()
+    lake['delta'] = lake['level_ft'].diff()
+    merged = (lake[['date', 'delta']]
+              .merge(nino_daily, on='date', how='inner')
+              .dropna(subset=['delta', 'index']))
+    merged['month'] = merged['date'].dt.month
+
+    coeffs = {}
+    for month in range(1, 13):
+        sub = merged[merged['month'] == month]
+        if len(sub) < min_samples:
+            coeffs[month] = (float(sub['delta'].mean()) if len(sub) else 0.0, 0.0)
+            continue
+        slope, intercept = np.polyfit(sub['index'], sub['delta'], 1)
+        coeffs[month] = (float(intercept), float(slope))
+    return coeffs
+
+
+def _nino_scenario_value(date: pd.Timestamp, elevated_end: pd.Timestamp,
+                         decay_end: pd.Timestamp, target_index: float) -> float:
+    """Assumed index on `date`: flat at target through January, then linear to neutral."""
+    if date <= elevated_end:
+        return target_index
+    if date <= decay_end:
+        return target_index * (1 - (date - elevated_end).days / (decay_end - elevated_end).days)
+    return 0.0
+
+
+def _roll_enso_scenario(coeffs: dict[int, tuple[float, float]], forecast_start: pd.Timestamp,
+                        start_level: float, horizon_days: int, target_index: float,
+                        decay_months: int = GATUN_ENSO_DECAY_MONTHS) -> pd.Series:
+    """Roll the daily sensitivity model forward from `start_level`, holding the
+    index at `target_index` through the upcoming January and decaying it linearly
+    to neutral over `decay_months` after that."""
+    jan31 = pd.Timestamp(year=forecast_start.year, month=1, day=31)
+    elevated_end = jan31 if jan31 > forecast_start else pd.Timestamp(year=forecast_start.year + 1, month=1, day=31)
+    decay_end = elevated_end + pd.DateOffset(months=decay_months)
+
+    dates = pd.date_range(start=forecast_start, periods=horizon_days, freq='D')
+    levels, level = [], start_level
+    for d in dates:
+        intercept, slope = coeffs[d.month]
+        level += intercept + slope * _nino_scenario_value(d, elevated_end, decay_end, target_index)
+        levels.append(level)
+    return pd.Series(levels, index=dates)
+
+
+def build_gatun_enso_index_forecast(hist_df: pd.DataFrame, proj_df: pd.DataFrame,
+                                     nino_daily: pd.DataFrame, target_index: float,
+                                     band: float = GATUN_ENSO_INDEX_BAND,
+                                     horizon_days: int = GATUN_ENSO_HORIZON_DAYS
+                                     ) -> tuple[pd.Series | None, pd.Series | None, pd.Series | None]:
+    """Central / low / high ENSO-model forecasts under an assumed Nino3.4 level.
+
+    Low and high re-run the same model at target -/+ `band`, so the ribbon shows
+    sensitivity to the index assumption — not a statistical confidence interval.
+    """
+    if hist_df.empty or nino_daily.empty:
+        return None, None, None
+
+    coeffs = fit_gatun_enso_sensitivity(hist_df, nino_daily)
+    _, _, forecast_end = _gatun_window(proj_df)
+    start_level = _forecast_end_level(hist_df, proj_df)
+    forecast_start = forecast_end + pd.Timedelta(days=1)
+
+    return (
+        _roll_enso_scenario(coeffs, forecast_start, start_level, horizon_days, target_index),
+        _roll_enso_scenario(coeffs, forecast_start, start_level, horizon_days, target_index - band),
+        _roll_enso_scenario(coeffs, forecast_start, start_level, horizon_days, target_index + band),
+    )
+
+
+# ─── Panama Canal watershed precipitation ────────────────────────────────────────
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_panama_precip_anomaly() -> pd.DataFrame:
+    """Canal watershed area-average precipitation vs day-of-year climatology.
+
+    Populated by lpg_desk_refresh.py from ERA5 actuals + ECMWF-ENS forecast
+    against a 2000-2024 'mix' normal. Columns: delivery_date, source
+    ('actual'/'forecast'), precip_mm, precip_clim_mm, precip_clim_std_mm,
+    deviation_pct.
+    """
+    sql = f"""
+    SELECT delivery_date, source, precip_mm, precip_clim_mm, precip_clim_std_mm, deviation_pct
+    FROM {SBX_SCHEMA}.panama_precip_anomaly
+    ORDER BY delivery_date
+    """
+    df = run_query(sql)
+    for c in ["precip_mm", "precip_clim_mm", "precip_clim_std_mm", "deviation_pct"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["delivery_date"] = pd.to_datetime(df["delivery_date"], errors="coerce")
+    return df
+
+
+def summarize_panama_precip(df: pd.DataFrame,
+                            lookback_days: int = PANAMA_PRECIP_LOOKBACK_DAYS,
+                            forecast_days: int = PANAMA_PRECIP_FORECAST_DAYS) -> dict:
+    """Totals vs normal over the recent-actuals and forecast windows.
+
+    Each window reports accumulated mm, the normal for those same calendar days,
+    and the departure in mm and %. Comparing accumulations (rather than averaging
+    daily deviation %) keeps a single dry day near zero normal from dominating —
+    what matters to the lake is total water in, not the ratio on any one day.
+    """
+    out = {"lookback": None, "forecast": None, "cumulative_departure_mm": None}
+    if df.empty:
+        return out
+
+    def _window(sub: pd.DataFrame, days: int, take_last: bool) -> dict | None:
+        sub = sub.dropna(subset=["precip_mm"]).sort_values("delivery_date")
+        if sub.empty:
+            return None
+        sub = sub.tail(days) if take_last else sub.head(days)
+        actual = float(sub["precip_mm"].sum())
+        normal = float(sub["precip_clim_mm"].sum()) if sub["precip_clim_mm"].notna().any() else None
+        dev_mm = actual - normal if normal is not None else None
+        dev_pct = (100.0 * dev_mm / normal) if normal else None
+        return {
+            "days": len(sub),
+            "start": sub["delivery_date"].iloc[0],
+            "end": sub["delivery_date"].iloc[-1],
+            "actual_mm": actual,
+            "normal_mm": normal,
+            "departure_mm": dev_mm,
+            "departure_pct": dev_pct,
+        }
+
+    out["lookback"] = _window(df[df["source"] == "actual"], lookback_days, take_last=True)
+    out["forecast"] = _window(df[df["source"] == "forecast"], forecast_days, take_last=False)
+
+    # Running mm ahead of / behind normal across every actual on file — the
+    # slow-moving number, since the lake integrates rainfall over months.
+    act = df[(df["source"] == "actual")].dropna(subset=["precip_mm", "precip_clim_mm"])
+    if not act.empty:
+        out["cumulative_departure_mm"] = float((act["precip_mm"] - act["precip_clim_mm"]).sum())
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════════════════

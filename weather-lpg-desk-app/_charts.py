@@ -13,7 +13,7 @@ import plotly.graph_objects as go
 
 from _config import (
     PADD_COLORS, ASIA_COLORS, INDIA_COLORS, PADD3_COASTAL_COLORS,
-    NAFRICA_WIND_COLORS, GATUN_ANALOG_COLORS,
+    NAFRICA_WIND_COLORS, GATUN_ANALOG_RAMP,
     GATUN_RATE_SURCHARGE_FT, GATUN_RESTRICTION_FT,
     WIND_CAUTION_MS, WIND_WARNING_MS, WIND_GALE_MS,
     FREEZE_THRESHOLD_C, FROST_THRESHOLD_C,
@@ -21,8 +21,8 @@ from _config import (
 )
 from _style import (
     PLOTLY_LAYOUT, GEO_LAYOUT, INK_PRIMARY, INK_SECONDARY, INK_MUTED, GRIDLINE,
-    DIV_POS, DIV_NEG, STATUS_WARNING, STATUS_CRITICAL,
-    STORM_RAMP, CAT_ORANGE,
+    BASELINE, DIV_POS, DIV_NEG, STATUS_WARNING, STATUS_CRITICAL,
+    STORM_RAMP, CAT_BLUE, CAT_GREEN, CAT_ORANGE, CAT_RED,
 )
 
 
@@ -263,34 +263,33 @@ def make_india_precip_deviation_chart(df: pd.DataFrame) -> go.Figure:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 4: GATUN LAKE — observed, official forecast, El Nino analog years
+# TAB 4: PANAMA CANAL — Gatun level + forecasts, watershed precipitation
 # ══════════════════════════════════════════════════════════════════════════════
+# Every forecast chart shares one base — observed, official ACP forecast, and
+# the two draft thresholds — so switching method changes only the projected
+# curve and the reader keeps the same reference frame.
 
-def make_gatun_lake_chart(hist_df: pd.DataFrame, proj_df: pd.DataFrame,
-                           analog_overlays: dict[int, pd.DataFrame]) -> go.Figure:
-    """Observed level + official ACP forecast + El Nino analog-year overlays."""
-    fig = _base_fig("Gatun Lake — Observed, Official Forecast & El Nino Analog Years", height=460)
+def _gatun_base_fig(title: str, height: int = 470) -> go.Figure:
+    fig = _base_fig(title, height=height)
+    fig.update_yaxes(title_text="Lake Level (feet)")
+    return fig
 
+
+def _add_gatun_observed(fig: go.Figure, hist_df: pd.DataFrame, proj_df: pd.DataFrame) -> None:
     if not hist_df.empty:
         recent = hist_df[hist_df["date"] >= pd.Timestamp.today() - pd.DateOffset(days=365)]
         fig.add_trace(go.Scatter(
             x=recent["date"], y=recent["level_ft"], name="Observed", mode="lines",
-            line=dict(color=PADD_COLORS.get("PADD 1 - Northeast", "#2a78d6"), width=2.5),
+            line=dict(color=CAT_BLUE, width=2.5),
         ))
-
     if not proj_df.empty:
         fig.add_trace(go.Scatter(
             x=proj_df["date"], y=proj_df["level_ft"], name="Official ACP Forecast", mode="lines",
-            line=dict(color="#e34948", width=2, dash="dash"),
+            line=dict(color=CAT_RED, width=2, dash="dash"),
         ))
 
-    for year, adf in sorted(analog_overlays.items()):
-        fig.add_trace(go.Scatter(
-            x=adf["date"], y=adf["level_ft"], name=f"{year} (El Nino analog)", mode="lines",
-            line=dict(color=GATUN_ANALOG_COLORS.get(year, INK_MUTED), width=1.5, dash="dot"),
-            opacity=0.85,
-        ))
 
+def _add_gatun_thresholds(fig: go.Figure) -> None:
     fig.add_hline(y=GATUN_RATE_SURCHARGE_FT, line_color=STATUS_WARNING, line_dash="dash", line_width=1.5,
                   annotation_text=f"{GATUN_RATE_SURCHARGE_FT:.0f} ft — Increased Shipping Rates",
                   annotation_font_color=STATUS_WARNING, annotation_position="bottom right")
@@ -298,7 +297,215 @@ def make_gatun_lake_chart(hist_df: pd.DataFrame, proj_df: pd.DataFrame,
                   annotation_text=f"{GATUN_RESTRICTION_FT:.0f} ft — Significant Restrictions",
                   annotation_font_color=STATUS_CRITICAL, annotation_position="bottom right")
 
-    fig.update_yaxes(title_text="Lake Level (feet)")
+
+def _analog_color(position: int) -> str:
+    """Analog years read as history, so they take one muted ramp by draw position
+    rather than a categorical hue — adding a year in the UI can't restyle the
+    ones already on the chart, and none of them competes with observed/forecast."""
+    return GATUN_ANALOG_RAMP[position % len(GATUN_ANALOG_RAMP)]
+
+
+def make_gatun_lake_chart(hist_df: pd.DataFrame, proj_df: pd.DataFrame,
+                           analog_overlays: dict[int, pd.DataFrame],
+                           extensions: dict[int, pd.Series] | None = None,
+                           mean_series: pd.Series | None = None) -> go.Figure:
+    """Observed + official ACP forecast + El Nino analog years.
+
+    With `extensions`/`mean_series` supplied, each analog also continues past the
+    official forecast's end as a level-change extension anchored on its last
+    point, and their mean is drawn as the headline projection.
+    """
+    titled = "Gatun Lake — Observed, Official Forecast & El Nino Analog Years"
+    if extensions:
+        titled += " (extended)"
+    fig = _gatun_base_fig(titled)
+    _add_gatun_observed(fig, hist_df, proj_df)
+
+    for i, (year, adf) in enumerate(sorted(analog_overlays.items())):
+        fig.add_trace(go.Scatter(
+            x=adf["date"], y=adf["level_ft"], name=f"{year} (El Nino analog)", mode="lines",
+            line=dict(color=_analog_color(i), width=1.5, dash="dot"), opacity=0.85,
+        ))
+
+    for i, (year, series) in enumerate(sorted((extensions or {}).items())):
+        fig.add_trace(go.Scatter(
+            x=series.index, y=series.values, name=f"{year} extension", mode="lines",
+            line=dict(color=_analog_color(i), width=1.8), opacity=0.75, showlegend=False,
+            hovertemplate=f"{year} extension<br>%{{x|%d %b %Y}} · %{{y:.2f}} ft<extra></extra>",
+        ))
+
+    if mean_series is not None and not mean_series.empty:
+        fig.add_trace(go.Scatter(
+            x=mean_series.index, y=mean_series.values, name="Mean of analog extensions",
+            mode="lines", line=dict(color=INK_PRIMARY, width=2.8),
+            hovertemplate="Analog mean<br>%{x|%d %b %Y} · %{y:.2f} ft<extra></extra>",
+        ))
+
+    _add_gatun_thresholds(fig)
+    return fig
+
+
+def make_gatun_enso_index_chart(hist_df: pd.DataFrame, proj_df: pd.DataFrame,
+                                 central: pd.Series | None, low: pd.Series | None,
+                                 high: pd.Series | None, target_index: float,
+                                 band: float) -> go.Figure:
+    """ENSO-regression forecast: level rolled forward under an assumed Nino3.4 level.
+
+    The ribbon spans the same model re-run at target +/- band — it shows how much
+    the projection moves with the index assumption, not a statistical interval.
+    """
+    fig = _gatun_base_fig(f"Gatun Lake — ENSO Index Model (Nino3.4 = {target_index:+.1f} ± {band:.1f})")
+    _add_gatun_observed(fig, hist_df, proj_df)
+
+    if central is not None and not central.empty:
+        if low is not None and high is not None:
+            fig.add_trace(go.Scatter(
+                x=high.index, y=high.values, mode="lines", line=dict(width=0),
+                showlegend=False, hoverinfo="skip",
+            ))
+            fig.add_trace(go.Scatter(
+                x=low.index, y=low.values, mode="lines", line=dict(width=0),
+                fill="tonexty", fillcolor=_hex_to_rgba(CAT_GREEN, 0.16),
+                name=f"Nino3.4 {target_index - band:+.1f} to {target_index + band:+.1f}",
+                hoverinfo="skip",
+            ))
+        fig.add_trace(go.Scatter(
+            x=central.index, y=central.values, name="ENSO model forecast", mode="lines",
+            line=dict(color=CAT_GREEN, width=2.8),
+            hovertemplate="ENSO model<br>%{x|%d %b %Y} · %{y:.2f} ft<extra></extra>",
+        ))
+
+    _add_gatun_thresholds(fig)
+    return fig
+
+
+def make_gatun_composite_chart(hist_df: pd.DataFrame, proj_df: pd.DataFrame,
+                                extensions: dict[int, pd.Series],
+                                mean_series: pd.Series | None,
+                                std_series: pd.Series | None) -> go.Figure:
+    """Mean trajectory of the strongest El Nino events, +/- 1 std across them."""
+    years = ", ".join(str(y) for y in sorted(extensions)) or "n/a"
+    fig = _gatun_base_fig(f"Gatun Lake — ENSO Composite Forecast ({years})")
+    _add_gatun_observed(fig, hist_df, proj_df)
+
+    for i, (year, series) in enumerate(sorted(extensions.items())):
+        fig.add_trace(go.Scatter(
+            x=series.index, y=series.values, name=str(year), mode="lines",
+            line=dict(color=_analog_color(i), width=1.4, dash="dot"), opacity=0.7,
+        ))
+
+    if mean_series is not None and not mean_series.empty:
+        if std_series is not None and not std_series.empty:
+            fig.add_trace(go.Scatter(
+                x=mean_series.index, y=(mean_series + std_series).values, mode="lines",
+                line=dict(width=0), showlegend=False, hoverinfo="skip",
+            ))
+            fig.add_trace(go.Scatter(
+                x=mean_series.index, y=(mean_series - std_series).values, mode="lines",
+                line=dict(width=0), fill="tonexty", fillcolor=_hex_to_rgba(CAT_ORANGE, 0.16),
+                name="± 1 std across composite years", hoverinfo="skip",
+            ))
+        fig.add_trace(go.Scatter(
+            x=mean_series.index, y=mean_series.values, name="Composite forecast",
+            mode="lines", line=dict(color=CAT_ORANGE, width=2.8),
+            hovertemplate="Composite<br>%{x|%d %b %Y} · %{y:.2f} ft<extra></extra>",
+        ))
+
+    _add_gatun_thresholds(fig)
+    return fig
+
+
+# ─── Panama Canal watershed precipitation ────────────────────────────────────────
+
+def make_panama_precip_chart(df: pd.DataFrame) -> go.Figure:
+    """Daily catchment rainfall against its day-of-year normal.
+
+    Bars carry anomaly polarity — blue above normal, red below — so the wet/dry
+    read comes straight off the bar colour, with the gray ±1σ band showing how
+    much day-to-day scatter is ordinary for the season.
+    """
+    fig = _base_fig("Canal Watershed — Daily Precipitation vs Normal", height=330)
+
+    act = df[df["source"] == "actual"].sort_values("delivery_date")
+    fcst = df[df["source"] == "forecast"].sort_values("delivery_date")
+
+    clim = df.dropna(subset=["precip_clim_mm"]).sort_values("delivery_date")
+    if not clim.empty:
+        std = clim["precip_clim_std_mm"].fillna(0)
+        fig.add_trace(go.Scatter(
+            x=clim["delivery_date"], y=(clim["precip_clim_mm"] + std),
+            mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip",
+        ))
+        fig.add_trace(go.Scatter(
+            x=clim["delivery_date"], y=(clim["precip_clim_mm"] - std).clip(lower=0),
+            mode="lines", line=dict(width=0), fill="tonexty",
+            fillcolor=_hex_to_rgba(INK_MUTED, 0.18), name="Normal ± 1σ", hoverinfo="skip",
+        ))
+        fig.add_trace(go.Scatter(
+            x=clim["delivery_date"], y=clim["precip_clim_mm"], name="Normal (2000-24)",
+            mode="lines", line=dict(color=INK_MUTED, width=1.2, dash="dash"),
+        ))
+
+    if not act.empty:
+        dev = act["precip_mm"] - act["precip_clim_mm"]
+        fig.add_trace(go.Bar(
+            x=act["delivery_date"], y=act["precip_mm"], name="Actual",
+            marker_color=[DIV_NEG if v < 0 else DIV_POS for v in dev.fillna(0)],
+            marker_line_width=0, opacity=0.85,
+            hovertemplate="%{x|%d %b} · %{y:.1f} mm<extra></extra>",
+        ))
+    if not fcst.empty:
+        fig.add_trace(go.Bar(
+            x=fcst["delivery_date"], y=fcst["precip_mm"], name="Forecast",
+            marker_color=CAT_ORANGE, marker_line_width=0, opacity=0.75,
+            hovertemplate="%{x|%d %b} · %{y:.1f} mm (fcst)<extra></extra>",
+        ))
+
+    fig.update_layout(barmode="overlay")
+    fig.update_yaxes(title_text="mm/day")
+    return fig
+
+
+def make_panama_precip_departure_chart(df: pd.DataFrame) -> go.Figure:
+    """Running mm ahead of / behind normal — the number the lake actually integrates.
+
+    A single wet day moves the daily chart and nothing else; this line is what
+    translates into storage, so a sustained slope down is the drought signal.
+    """
+    fig = _base_fig("Canal Watershed — Cumulative Departure from Normal", height=330)
+
+    d = df.dropna(subset=["precip_mm", "precip_clim_mm"]).sort_values("delivery_date")
+    act = d[d["source"] == "actual"]
+    fcst = d[d["source"] == "forecast"]
+
+    end_cum = 0.0
+    if not act.empty:
+        cum = (act["precip_mm"] - act["precip_clim_mm"]).cumsum()
+        end_cum = float(cum.iloc[-1])
+        fig.add_trace(go.Scatter(
+            x=act["delivery_date"], y=cum.values, name="Cumulative departure",
+            mode="lines", line=dict(color=CAT_BLUE, width=2.5),
+            fill="tozeroy", fillcolor=_hex_to_rgba(CAT_BLUE, 0.10),
+            hovertemplate="%{x|%d %b} · %{y:+.0f} mm vs normal<extra></extra>",
+        ))
+
+    if not fcst.empty:
+        cum_f = end_cum + (fcst["precip_mm"] - fcst["precip_clim_mm"]).cumsum()
+        # Bridge off the last actual so the forecast leg starts on the line
+        # rather than floating at its own first value.
+        xs = list(fcst["delivery_date"])
+        ys = list(cum_f.values)
+        if not act.empty:
+            xs = [act["delivery_date"].iloc[-1]] + xs
+            ys = [end_cum] + ys
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys, name="Forecast (extended)", mode="lines",
+            line=dict(color=CAT_ORANGE, width=2, dash="dash"),
+            hovertemplate="%{x|%d %b} · %{y:+.0f} mm vs normal (fcst)<extra></extra>",
+        ))
+
+    fig.add_hline(y=0, line_color=BASELINE, line_width=1.2)
+    fig.update_yaxes(title_text="Departure (mm)")
     return fig
 
 

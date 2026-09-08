@@ -4,7 +4,7 @@ Sections (picked from the sidebar):
   1. US HDD by PADD        — Cumulative HDD + run comparison
   2. Asia HDD              — Japan, South Korea, China (N/E/S)
   3. India Precipitation   — Anomaly vs climatology
-  4. Gatun Lake            — Observed level + official forecast + El Nino analogs
+  4. Panama Canal          — Gatun level, El Nino / ENSO forecasts, watershed rain
   5. PADD 3 Coastal Temps  — Export terminal freeze risk
   6. Hurricanes            — US Gulf/Atlantic + NW Australia cyclones
   7. North Africa Wind     — Tangier-Algeria-Port Said corridor
@@ -27,6 +27,10 @@ from _config import (
     NAFRICA_WIND_CORRIDOR, DEFAULT_NAFRICA_PORTS, WIND_GALE_MS,
     HDD_BASE_TEMP,
     GATUN_ANALOG_YEARS, GATUN_RESTRICTION_FT, GATUN_RATE_SURCHARGE_FT,
+    GATUN_FORECAST_METHODS, GATUN_COMPOSITE_YEARS, GATUN_FALLBACK_ANALOG_YEARS,
+    GATUN_ENSO_HORIZON_DAYS, GATUN_ENSO_INDEX_BAND, GATUN_ENSO_DECAY_MONTHS,
+    PANAMA_PRECIP_LOOKBACK_DAYS, PANAMA_PRECIP_FORECAST_DAYS,
+    PANAMA_PRECIP_NEAR_NORMAL_PCT,
     HURRICANE_BASINS,
     is_in_hdd_season, hdd_season_label, hdd_season_start_year,
 )
@@ -35,7 +39,10 @@ from _data import (
     load_asia_hdd_season, load_asia_hdd_normal, load_asia_hdd_season_history,
     compute_season_kpis,
     load_india_precip_anomaly,
-    load_gatun_lake_levels, build_gatun_analog_overlays,
+    load_gatun_lake_levels, build_gatun_analog_overlays, build_gatun_analog_extension,
+    build_gatun_composite_forecast, build_gatun_enso_index_forecast,
+    load_oni_monthly, oni_to_daily, list_el_nino_onset_years,
+    load_panama_precip_anomaly, summarize_panama_precip,
     load_padd3_coastal_temps,
     load_hurricane_data,
     load_nafrica_wind,
@@ -45,7 +52,8 @@ from _charts import (
     make_hdd_season_chart, make_hdd_comparison_chart,
     make_asia_hdd_season_chart, make_asia_hdd_bar_chart,
     make_india_precip_timeseries, make_india_precip_deviation_chart,
-    make_gatun_lake_chart,
+    make_gatun_lake_chart, make_gatun_enso_index_chart, make_gatun_composite_chart,
+    make_panama_precip_chart, make_panama_precip_departure_chart,
     make_padd3_temp_chart,
     make_hurricane_map,
     make_wind_corridor_chart, make_wind_exceedance_chart,
@@ -295,13 +303,270 @@ def render_india_precip():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 4: GATUN LAKE
+# TAB 4: PANAMA CANAL
 # ══════════════════════════════════════════════════════════════════════════════
+def _gatun_status(level_ft: float) -> tuple[str, str]:
+    """Draft-restriction status and its KPI card class for a lake level."""
+    if level_ft < GATUN_RESTRICTION_FT:
+        return "Critical — Major Restrictions", "kpi-card-critical"
+    if level_ft < GATUN_RATE_SURCHARGE_FT:
+        return "Caution — Rate Surcharges", "kpi-card-warning"
+    return "Normal Operations", "kpi-card-good"
+
+
+def _precip_kpi_card(label: str, window: dict | None) -> str:
+    """Accumulated rainfall over a window, with its departure from normal.
+
+    Below-normal rain is the bearish-for-transit case, so it takes the warning
+    card; wet gets the neutral 'cool' accent. Departures inside the near-normal
+    band are called out as such rather than shown as a small signed number the
+    reader would over-read.
+    """
+    if not window:
+        return raw_kpi_card(label, "N/A", "kpi-card-neutral")
+
+    value = f"{window['actual_mm']:.0f} mm"
+    pct = window.get("departure_pct")
+    if pct is None:
+        return raw_kpi_card(label, value, "kpi-card-neutral")
+
+    if abs(pct) < PANAMA_PRECIP_NEAR_NORMAL_PCT:
+        card_class, word, arrow, d_cls = "kpi-card-neutral", "near normal", "●", "kpi-delta-flat"
+    elif pct < 0:
+        card_class, word, arrow, d_cls = "kpi-card-warning", "below normal", "▼", "kpi-delta-down"
+    else:
+        card_class, word, arrow, d_cls = "kpi-card-cool", "above normal", "▲", "kpi-delta-up"
+
+    delta = f'<div class="kpi-delta {d_cls}">{arrow} {abs(pct):.0f}% {word}</div>'
+    return (f'<div class="kpi-card {card_class}"><div class="kpi-label">{label}</div>'
+            f'<div class="kpi-value">{value}</div>{delta}</div>')
+
+
+def _render_gatun_forecast(hist_df: pd.DataFrame, proj_df: pd.DataFrame):
+    """Level-forecast block: pick a method, tune its assumptions, draw the curve.
+
+    All three methods extend the *official* ACP forecast rather than replacing
+    it — each is anchored on the ACP curve's last level — so they answer "what
+    happens after the official horizon runs out", which is the question the
+    60-day ACP projection leaves open.
+    """
+    st.markdown("##### Level forecast")
+
+    # The analog picker is driven by the live ONI record so newly-qualifying
+    # events show up on their own; the hardcoded list is only the offline path.
+    oni_df, oni_error = pd.DataFrame(), None
+    try:
+        oni_df = load_oni_monthly()
+    except Exception as e:
+        oni_error = str(e)
+
+    el_nino_years = list_el_nino_onset_years(oni_df) if not oni_df.empty else {}
+    latest_oni = float(oni_df["oni"].iloc[-1]) if not oni_df.empty else 0.0
+    available_years = sorted(el_nino_years) or GATUN_FALLBACK_ANALOG_YEARS
+
+    headline = None   # series the threshold verdict below is read off
+    ctl, opt = st.columns([1, 2])
+    with ctl:
+        method = st.radio("Forecast method", GATUN_FORECAST_METHODS,
+                          key="gatun_method", horizontal=False)
+
+    if method == "Analog years":
+        with opt:
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                years = st.multiselect(
+                    "Analog El Nino years",
+                    options=available_years,
+                    default=[y for y in GATUN_ANALOG_YEARS if y in available_years] or available_years[-3:],
+                    format_func=lambda y: (f"{y}  (ONI {el_nino_years[y]:+.2f})"
+                                           if y in el_nino_years else str(y)),
+                    key="gatun_analog_years",
+                    help="Each year is an El Nino onset year — the event that developed "
+                         "Sep of that year through the following Jan. Its observed lake "
+                         "trajectory is shifted onto today's calendar.",
+                )
+            with c2:
+                extend = st.checkbox("Extend", value=True, key="gatun_extend",
+                                     help="Continue each analog past the official forecast's "
+                                          "end, applying its level change to the ACP curve's "
+                                          "last level.")
+        if not years:
+            st.info("Pick at least one analog year to draw.")
+            return
+
+        overlays = build_gatun_analog_overlays(hist_df, proj_df, years)
+        extensions, mean_series = (build_gatun_analog_extension(hist_df, proj_df, years)
+                                   if extend else ({}, None))
+        missing = [y for y in years if y not in overlays]
+        if missing:
+            st.caption(f"No ACP level history for {', '.join(str(y) for y in missing)} — skipped.")
+        fig = make_gatun_lake_chart(hist_df, proj_df, overlays, extensions, mean_series)
+        st.plotly_chart(fig, use_container_width=True)
+        headline = mean_series
+
+    elif method == "ENSO index model":
+        if oni_df.empty:
+            st.error(f"Nino3.4 index unavailable from NOAA CPC — {oni_error}. "
+                     "The ENSO index model needs it to fit monthly sensitivities.")
+            return
+        with opt:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                target = st.slider("Assumed Nino3.4", -2.5, 3.0, round(latest_oni, 1), 0.1,
+                                   key="gatun_enso_target",
+                                   help=f"Index held at this level through the coming January, "
+                                        f"then decaying to neutral over {GATUN_ENSO_DECAY_MONTHS} "
+                                        f"months. Defaults to the latest observed ONI "
+                                        f"({latest_oni:+.2f}).")
+            with c2:
+                band = st.slider("± band", 0.0, 1.5, GATUN_ENSO_INDEX_BAND, 0.1,
+                                 key="gatun_enso_band",
+                                 help="The model is re-run at target ± this, drawn as a ribbon.")
+            with c3:
+                horizon = st.slider("Horizon (days)", 90, 730, GATUN_ENSO_HORIZON_DAYS, 30,
+                                    key="gatun_enso_horizon")
+
+        nino_daily = oni_to_daily(oni_df)
+        central, low, high = build_gatun_enso_index_forecast(
+            hist_df, proj_df, nino_daily, target, band, horizon)
+        if central is None:
+            st.warning("Not enough overlapping lake/index history to fit the ENSO model.")
+            return
+        fig = make_gatun_enso_index_chart(hist_df, proj_df, central, low, high, target, band)
+        st.plotly_chart(fig, use_container_width=True)
+        headline = central
+        st.caption(
+            f"Latest observed ONI: **{latest_oni:+.2f}** ({oni_df['date'].iloc[-1]:%b %Y}, NOAA CPC). "
+            "Monthly sensitivities are fit on the full 1965-present record, so the ribbon reflects "
+            "the index assumption — not statistical confidence. Nino3.4 historically explains only "
+            "a small share of Gatun's month-to-month change; treat the composite below as the "
+            "sanity check on this curve."
+        )
+
+    else:  # ENSO composite
+        with opt:
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                comp_years = st.multiselect(
+                    "Composite years",
+                    options=available_years,
+                    default=[y for y in GATUN_COMPOSITE_YEARS if y in available_years] or available_years[-4:],
+                    format_func=lambda y: (f"{y}  (ONI {el_nino_years[y]:+.2f})"
+                                           if y in el_nino_years else str(y)),
+                    key="gatun_composite_years",
+                    help="Averaged rather than regressed — what the lake actually did in "
+                         "these events, instead of an extrapolated index slope.",
+                )
+            with c2:
+                horizon = st.slider("Horizon (days)", 90, 730, GATUN_ENSO_HORIZON_DAYS, 30,
+                                    key="gatun_comp_horizon")
+        if not comp_years:
+            st.info("Pick at least one year to composite.")
+            return
+
+        extensions, mean_series, std_series = build_gatun_composite_forecast(
+            hist_df, proj_df, comp_years, horizon)
+        if not extensions:
+            st.warning("No ACP level history for the selected composite years.")
+            return
+        fig = make_gatun_composite_chart(hist_df, proj_df, extensions, mean_series, std_series)
+        st.plotly_chart(fig, use_container_width=True)
+        headline = mean_series
+
+    # Whichever method is showing, say plainly whether it breaches a threshold.
+    _render_forecast_verdict(headline)
+
+
+def _render_forecast_verdict(series):
+    """Flag the deepest point of whichever projection is on screen against the
+    two draft thresholds, so the chart's trading implication is stated in words."""
+    if series is None or len(series) == 0:
+        return
+    trough = float(series.min())
+    trough_date = series.idxmin()
+    if trough < GATUN_RESTRICTION_FT:
+        level, msg = "critical", (f"Projection troughs at {trough:.1f} ft around "
+                                  f"{pd.Timestamp(trough_date):%b %Y} — below the "
+                                  f"{GATUN_RESTRICTION_FT:.0f} ft restriction line. VLGCs would "
+                                  "face draft limits or a Cape reroute.")
+    elif trough < GATUN_RATE_SURCHARGE_FT:
+        level, msg = "warning", (f"Projection troughs at {trough:.1f} ft around "
+                                 f"{pd.Timestamp(trough_date):%b %Y} — below the "
+                                 f"{GATUN_RATE_SURCHARGE_FT:.0f} ft surcharge line, above the "
+                                 "restriction line.")
+    else:
+        level, msg = "good", (f"Projection stays above {GATUN_RATE_SURCHARGE_FT:.0f} ft "
+                              f"throughout (trough {trough:.1f} ft) — no transit constraint implied.")
+    st.markdown(status_banner(msg, level), unsafe_allow_html=True)
+
+
+def _render_panama_precip():
+    """Watershed rainfall vs normal — the upstream driver of the level charts above."""
+    st.markdown("##### Watershed precipitation vs normal")
+    st.caption("Area-average rainfall over the Gatun / Alhajuela catchment against its "
+               "2000-2024 day-of-year normal. Rain into this catchment is the lake's only "
+               "inflow, so a sustained dry departure leads the level down by weeks to months.")
+
+    try:
+        precip_df = load_panama_precip_anomaly()
+    except Exception as e:
+        st.markdown(
+            status_banner("Watershed precipitation unavailable. If panama_precip_anomaly has "
+                          "not been built yet, run lpg_desk_refresh.py in Databricks to "
+                          f"populate it. ({e})", "warning"),
+            unsafe_allow_html=True,
+        )
+        return
+
+    if precip_df.empty:
+        st.info("No Panama watershed precipitation data available.")
+        return
+
+    summary = summarize_panama_precip(precip_df)
+    k1, k2, k3 = st.columns(3)
+    with k1:
+        st.markdown(_precip_kpi_card(f"Last {PANAMA_PRECIP_LOOKBACK_DAYS}d rainfall",
+                                     summary["lookback"]), unsafe_allow_html=True)
+    with k2:
+        st.markdown(_precip_kpi_card(f"Next {PANAMA_PRECIP_FORECAST_DAYS}d forecast",
+                                     summary["forecast"]), unsafe_allow_html=True)
+    with k3:
+        cum = summary["cumulative_departure_mm"]
+        if cum is None:
+            st.markdown(raw_kpi_card("Cumulative vs normal", "N/A"), unsafe_allow_html=True)
+        else:
+            cls = "kpi-card-warning" if cum < 0 else "kpi-card-cool"
+            st.markdown(raw_kpi_card("Cumulative vs normal", f"{cum:+.0f} mm", cls),
+                        unsafe_allow_html=True)
+
+    fcst = summary.get("forecast")
+    if fcst and fcst.get("departure_pct") is not None:
+        pct, mm = fcst["departure_pct"], fcst["departure_mm"]
+        if abs(pct) < PANAMA_PRECIP_NEAR_NORMAL_PCT:
+            level, verdict = "good", f"near normal ({pct:+.0f}%)"
+        elif pct < 0:
+            level, verdict = "warning", f"BELOW normal ({pct:+.0f}%, {mm:+.0f} mm)"
+        else:
+            level, verdict = "good", f"ABOVE normal ({pct:+.0f}%, {mm:+.0f} mm)"
+        st.markdown(
+            status_banner(f"Next {fcst['days']} days of catchment rainfall are forecast "
+                          f"{verdict} — {fcst['actual_mm']:.0f} mm vs a "
+                          f"{fcst['normal_mm']:.0f} mm normal.", level),
+            unsafe_allow_html=True,
+        )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.plotly_chart(make_panama_precip_chart(precip_df), use_container_width=True)
+    with c2:
+        st.plotly_chart(make_panama_precip_departure_chart(precip_df), use_container_width=True)
+
+
 def render_gatun_lake():
-    st.markdown("#### GATUN LAKE — PANAMA CANAL")
-    st.caption("Observed water level + official ACP forecast, overlaid with the strongest historical "
-               f"El Nino years ({', '.join(str(y) for y in GATUN_ANALOG_YEARS)}), time-shifted onto today's "
-               "calendar. Source: Panama Canal Authority (live).")
+    st.markdown("#### PANAMA CANAL — GATUN LAKE")
+    st.caption("Observed water level and official ACP forecast, extended by El Nino analogs or "
+               "an ENSO-index model, plus the watershed rainfall driving them. "
+               "Sources: Panama Canal Authority + NOAA CPC (live), ECMWF via Databricks.")
 
     try:
         hist_df, proj_df = load_gatun_lake_levels()
@@ -313,25 +578,30 @@ def render_gatun_lake():
         st.warning("No Gatun Lake level data — the ACP endpoint may be unreachable.")
         return
 
-    current_level = float(hist_df.sort_values("date")["level_ft"].iloc[-1])
-    if current_level < GATUN_RESTRICTION_FT:
-        status, card_class = "Critical — Major Restrictions", "kpi-card-critical"
-    elif current_level < GATUN_RATE_SURCHARGE_FT:
-        status, card_class = "Caution — Rate Surcharges", "kpi-card-warning"
-    else:
-        status, card_class = "Normal Operations", "kpi-card-good"
+    recent = hist_df.sort_values("date")
+    current_level = float(recent["level_ft"].iloc[-1])
+    status, card_class = _gatun_status(current_level)
 
-    kc1, kc2 = st.columns([1, 3])
+    trend = ""
+    week_ago = recent[recent["date"] <= recent["date"].iloc[-1] - pd.Timedelta(days=7)]
+    if not week_ago.empty:
+        delta = current_level - float(week_ago["level_ft"].iloc[-1])
+        trend = f"{'▲' if delta > 0 else '▼'} {abs(delta):.2f} ft over 7 days"
+
+    kc1, kc2, kc3 = st.columns([1, 1, 2])
     with kc1:
-        st.markdown(raw_kpi_card("Gatun Lake Level", f"{current_level:.1f} ft", card_class), unsafe_allow_html=True)
+        st.markdown(raw_kpi_card("Gatun Lake Level", f"{current_level:.1f} ft", card_class),
+                    unsafe_allow_html=True)
     with kc2:
+        st.markdown(raw_kpi_card("7-day trend", trend or "N/A", "kpi-card-neutral"),
+                    unsafe_allow_html=True)
+    with kc3:
         st.markdown(raw_kpi_card("Status", status, card_class), unsafe_allow_html=True)
 
     st.divider()
-
-    analog_overlays = build_gatun_analog_overlays(hist_df, proj_df)
-    fig = make_gatun_lake_chart(hist_df, proj_df, analog_overlays)
-    st.plotly_chart(fig, use_container_width=True)
+    _render_gatun_forecast(hist_df, proj_df)
+    st.divider()
+    _render_panama_precip()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -778,7 +1048,7 @@ PAGES = {
     "US HDD": render_us_hdd,
     "Asia HDD": render_asia_hdd,
     "India Precipitation": render_india_precip,
-    "Gatun Lake": render_gatun_lake,
+    "Panama Canal": render_gatun_lake,
     "PADD 3 Coastal": render_padd3_coastal,
     "Hurricanes": render_hurricanes,
     "N. Africa Wind": render_nafrica_wind,

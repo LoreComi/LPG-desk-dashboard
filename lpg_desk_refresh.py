@@ -47,6 +47,7 @@ change):
   - asia_hdd_season, asia_hdd_normal             (Asia HDD)
   - asia_hdd_season_history                      (Asia HDD — prior winters)
   - india_precip_anomaly                         (India precip vs climatology)
+  - panama_precip_anomaly                        (Canal watershed precip vs climatology)
   - padd3_coastal_temps                          (PADD 3 export terminals)
   - nafrica_wind                                 (N.Africa shipping corridor)
 """
@@ -474,6 +475,69 @@ print(f"india_precip_anomaly: {spark.sql('SELECT COUNT(*) FROM dna_snbx_weather.
 
 # COMMAND ----------
 
+# DBTITLE 1,4b. Panama Canal watershed precipitation (day-of-year climatology + forecast)
+# The canal's water balance is rain-fed — Gatun Lake plus the Alhajuela/Chagres
+# reservoir upstream — so catchment rainfall vs normal is the leading indicator
+# for the lake level the app charts from the ACP feed. The true catchment is
+# roughly 8.9-9.6N / 79.2-80.2W; the box is rounded outward onto the 0.5-degree
+# Meteomatics grid so the area-average has grid points to average over.
+# Keep in sync with PANAMA_CATCHMENT in weather-lpg-desk-app/_config.py.
+PANAMA_BOX = "latitude BETWEEN 8.5 AND 10.0 AND longitude BETWEEN -80.5 AND -79.0"
+
+# 540 days of actuals: enough for a cumulative-departure line that spans more
+# than a full wet/dry cycle, which is the timescale the lake integrates over.
+spark.sql(f"""
+CREATE OR REPLACE TABLE dna_snbx_weather.lpg_desk.panama_precip_anomaly AS
+WITH actuals AS (
+  SELECT DATE(delivery_start) AS delivery_date, 'actual' AS source, AVG(value) AS precip_mm
+  FROM dna_prod_silver.meteomatics.precipitation
+  WHERE curve_name = 'precip_24h_mm_ecmwf_era5_p1d' AND model = 'ecmwf-era5'
+    AND delivery_start >= CURRENT_DATE() - INTERVAL 540 DAYS
+    AND {PANAMA_BOX}
+  GROUP BY DATE(delivery_start)
+),
+forecasts AS (
+  -- ENS stores 50 members per grid point per day; AVG gives the ensemble mean.
+  SELECT DATE(delivery_start) AS delivery_date, 'forecast' AS source, AVG(value) AS precip_mm
+  FROM dna_prod_silver.meteomatics.precipitation_forecast
+  WHERE curve_name = 'precip_24h_mm_ecmwf_ens_p1d' AND model = 'ecmwf-ens'
+    AND created_at = (SELECT MAX(created_at) FROM dna_prod_silver.meteomatics.precipitation_forecast
+                      WHERE model = 'ecmwf-ens' AND curve_name = 'precip_24h_mm_ecmwf_ens_p1d')
+    AND delivery_start >= CURRENT_DATE()
+    AND {PANAMA_BOX}
+  GROUP BY DATE(delivery_start)
+),
+-- Area-average first, per calendar day, so the spread below is year-to-year
+-- variability of catchment rainfall rather than scatter between grid points.
+clim_daily AS (
+  SELECT DAYOFYEAR(delivery_start) AS doy, DATE(delivery_start) AS dt, AVG(value) AS precip_mm
+  FROM dna_prod_silver.meteomatics.precipitation
+  WHERE curve_name = 'precip_24h_mm_mix_p1d' AND model = 'mix'
+    AND YEAR(delivery_start) BETWEEN 2000 AND 2024
+    AND {PANAMA_BOX}
+  GROUP BY DAYOFYEAR(delivery_start), DATE(delivery_start)
+),
+clim AS (
+  SELECT doy, AVG(precip_mm) AS precip_clim_mm, STDDEV(precip_mm) AS precip_clim_std_mm
+  FROM clim_daily GROUP BY doy
+),
+combined AS (
+  SELECT * FROM actuals UNION ALL SELECT * FROM forecasts
+)
+SELECT
+  c.delivery_date, c.source, c.precip_mm,
+  k.precip_clim_mm, k.precip_clim_std_mm,
+  CASE WHEN k.precip_clim_mm IS NOT NULL AND k.precip_clim_mm > 0.1
+    THEN ROUND(100.0 * (c.precip_mm - k.precip_clim_mm) / k.precip_clim_mm, 1)
+    ELSE NULL END AS deviation_pct
+FROM combined c
+LEFT JOIN clim k ON DAYOFYEAR(c.delivery_date) = k.doy
+ORDER BY c.delivery_date
+""")
+print(f"panama_precip_anomaly: {spark.sql('SELECT COUNT(*) FROM dna_snbx_weather.lpg_desk.panama_precip_anomaly').first()[0]} rows")
+
+# COMMAND ----------
+
 # DBTITLE 1,5. PADD 3 coastal temperatures (export terminals)
 PADD3_CITY_CASE = city_case_sql(PADD3_COASTAL_CITIES)
 PADD3_COORD_FILTER = coord_filter_sql(PADD3_COASTAL_CITIES.values())
@@ -554,7 +618,8 @@ print(f"{'='*60}")
 
 tables = ["hdd_season", "hdd_normal", "hdd_run_comparison", "hdd_season_history",
           "asia_hdd_season", "asia_hdd_normal", "asia_hdd_season_history",
-          "india_precip_anomaly", "padd3_coastal_temps", "nafrica_wind"]
+          "india_precip_anomaly", "panama_precip_anomaly",
+          "padd3_coastal_temps", "nafrica_wind"]
 for t in tables:
     cnt = spark.sql(f"SELECT COUNT(*) FROM dna_snbx_weather.lpg_desk.{t}").first()[0]
     print(f"  {t}: {cnt} rows")
