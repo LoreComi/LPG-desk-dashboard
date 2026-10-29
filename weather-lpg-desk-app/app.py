@@ -234,7 +234,14 @@ def render_us_hdd(view: str = "Forecast"):
         else:
             card = hdd_kpi_card(f"{US_WEIGHTED_LABEL} · season so far", us_kpis)
         st.markdown(card, unsafe_allow_html=True)
-    weight_set = gas_weight_season(us_kpis["as_of"].month) if us_kpis else "winter"
+    # Weight set for the dates this view shows: the forecast window's first day,
+    # or the latest actual day for the season-to-date view.
+    ref_date = us_kpis["as_of"] if us_kpis else None
+    if view == "Forecast":
+        fc = us["season"][~us["season"]["model_label"].str.contains("Actual", na=False)]
+        if not fc.empty:
+            ref_date = fc["delivery_date"].min()
+    weight_set = gas_weight_season(pd.Timestamp(ref_date).month) if ref_date is not None else "winter"
     st.caption(
         f"Gas-demand weighted ({weight_set} weights): "
         + ", ".join(f"{p.split(' - ')[0]} {w:.0%}" for p, w in GAS_DEMAND_WEIGHTS[weight_set].items())
@@ -1176,13 +1183,35 @@ _current = (nav_parent, nav_sub) if nav_parent in SUBPAGES else (nav_parent, Non
 if _current not in nav_options:
     _current = nav_options[0]
 
+def _subnav_css(options: list, current: tuple) -> str:
+    """Style the spliced-in sub-items as an indented, dot-less sub-list under
+    their section, and keep that section's own row highlighted while one of
+    its sub-items is the active view. Targets rows by position in the radio."""
+    rows = '[data-testid="stSidebar"] [data-testid="stRadio"] [role="radiogroup"] > label'
+    css = []
+    for pos, (page, sub) in enumerate(options, start=1):
+        if sub is not None:
+            css.append(
+                f'{rows}:nth-of-type({pos}) {{ margin-left: 26px; width: calc(100% - 26px) !important; '
+                f'padding: 5px 12px !important; border-left: 2px solid var(--border-bright); '
+                f'border-radius: 0 var(--radius-md) var(--radius-md) 0; }}'
+                # hide the radio circle: whichever child isn't the text container
+                f'{rows}:nth-of-type({pos}) > div:not(:has([data-testid="stMarkdownContainer"])) {{ display: none; }}'
+                f'{rows}:nth-of-type({pos}) p {{ font-size: 0.84rem !important; }}'
+            )
+        elif page == current[0] and current[1] is not None:
+            css.append(f'{rows}:nth-of-type({pos}) p {{ color: var(--accent) !important; font-weight: 600 !important; }}')
+    return f"<style>{''.join(css)}</style>" if css else ""
+
+
 with st.sidebar:
     st.markdown("### Sections")
     nav_choice = st.radio(
         "Sections", nav_options, index=nav_options.index(_current),
-        format_func=lambda o: o[0] if o[1] is None else f" ↳ {o[1]}",
+        format_func=lambda o: o[0] if o[1] is None else o[1],
         label_visibility="collapsed", key=f"nav_{nav_gen}",
     )
+    st.markdown(_subnav_css(nav_options, _current), unsafe_allow_html=True)
     st.divider()
     # A separate, distinct action (not a section to browse) — one click both
     # switches to this view and runs the analysis, instead of navigate-then-Generate.

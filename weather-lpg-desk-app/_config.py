@@ -129,9 +129,11 @@ GAS_DEMAND_WEIGHTS: dict[str, dict[str, float]] = {
         "PADD 5 - West":          0.05,
     },
 }
-# Months that use the winter set; every other month uses the summer set. Note
-# the HDD season starts Oct 1, so October HDD rows fall on the summer weights.
-GAS_WINTER_MONTHS = {11, 12, 1, 2, 3}
+# Months that use the winter set; every other month uses the summer set. The
+# desk defined winter as Nov-Mar, but the HDD season starts Oct 1 and October
+# HDD is heating load, so October is kept on the winter weights too — otherwise
+# early-season HDD would be weighted with the cooling (South-heavy) set.
+GAS_WINTER_MONTHS = {10, 11, 12, 1, 2, 3}
 US_WEIGHTED_LABEL = "US L48 (gas-weighted)"
 
 
