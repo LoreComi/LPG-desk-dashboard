@@ -183,6 +183,11 @@ p, .stMarkdown, span, label {{ color: var(--text-primary); }}
     margin-top: 6px;
     font-variant-numeric: tabular-nums;
 }}
+/* Compact variant — secondary cards that sit under a headline card */
+.kpi-card-sm {{ padding: 10px 12px; }}
+.kpi-card-sm .kpi-value {{ font-size: 1.1rem; margin-top: 3px; }}
+.kpi-card-sm .kpi-delta {{ font-size: 0.66rem; margin-top: 2px; }}
+.kpi-card-sm .kpi-rank {{ margin-top: 5px; font-size: 0.62rem; }}
 .kpi-delta {{ font-size: 0.72rem; margin-top: 4px; font-weight: 500; }}
 .kpi-delta-up    {{ color: {CAT_RED} !important; }}
 .kpi-delta-down  {{ color: {CAT_BLUE} !important; }}

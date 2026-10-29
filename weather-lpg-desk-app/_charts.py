@@ -170,10 +170,31 @@ def make_hdd_season_chart(df: pd.DataFrame, padd: str, normal_df: pd.DataFrame =
 _RUN_OPACITY = {1: 1.0, 2: 0.6, 3: 0.35}
 
 
+def _compact_run_layout(fig: go.Figure, title: str, height: int, values: list[float],
+                        y_title: str) -> None:
+    """Shared look for the two stacked run charts (totals + run-over-run), so
+    their plot areas and x-axes line up inside one area box: same side margins,
+    title top-left, legend directly under it, y-range padded for bar labels."""
+    fig.update_layout(
+        height=height,
+        title=dict(text=title, font=dict(size=13), x=0, xanchor="left", y=0.97, yanchor="top"),
+        margin=dict(l=55, r=15, t=62, b=28),
+        legend=dict(orientation="h", x=0, xanchor="left", y=1.0, yanchor="bottom",
+                    bgcolor="rgba(0,0,0,0)", borderwidth=0, font=dict(size=11, color=INK_SECONDARY)),
+        barmode="group", bargap=0.25, bargroupgap=0.05,
+    )
+    vals = [v for v in values if pd.notna(v)]
+    lo, hi = min(vals + [0.0]), max(vals + [0.0])
+    pad = (hi - lo) * 0.2 or 1.0   # room for the outside bar labels
+    fig.update_yaxes(title_text=y_title, range=[lo - (pad if lo < 0 else 0), hi + pad])
+    fig.update_traces(cliponaxis=False)
+
+
 def make_hdd_run_totals_chart(totals: pd.DataFrame, padd: str) -> go.Figure:
     """Window totals per model run — one group of bars per forecast window
-    (Day 0-4, 5-9, 10-14, Total), one bar per run (latest = darkest)."""
-    fig = _base_fig(f"HDD by Forecast Window — {padd}", height=320)
+    (Day 0-4, 5-9, 10-14, Total), one bar per run (latest = darkest). Titled
+    without the area name: it sits inside that area's box."""
+    fig = _base_fig()
     base = PADD_COLORS.get(padd, INK_SECONDARY)
 
     for rank in sorted(totals["run_rank"].unique()):
@@ -186,15 +207,14 @@ def make_hdd_run_totals_chart(totals: pd.DataFrame, padd: str) -> go.Figure:
             hovertemplate="%{x} · %{y:.1f} HDD (%{customdata} days)<extra>%{fullData.name}</extra>",
         ))
 
-    fig.update_layout(barmode="group")
-    fig.update_yaxes(title_text="HDD (°C-days)")
+    _compact_run_layout(fig, "HDD total per window, by run", 250, list(totals["total"]), "HDD (°C-days)")
     return fig
 
 
 def make_hdd_run_change_chart(change: pd.DataFrame, padd: str) -> go.Figure:
     """Run-over-run change in each window total (newer minus older run).
     Positive = newer run is colder."""
-    fig = _base_fig(f"Run-over-Run Change — {padd}", height=280)
+    fig = _base_fig()
     base = PADD_COLORS.get(padd, INK_SECONDARY)
 
     for i, pair in enumerate(change["pair"].unique()):
@@ -207,8 +227,7 @@ def make_hdd_run_change_chart(change: pd.DataFrame, padd: str) -> go.Figure:
         ))
 
     fig.add_hline(y=0, line_color=BASELINE, line_width=1)
-    fig.update_layout(barmode="group")
-    fig.update_yaxes(title_text="Δ HDD (+ = colder)")
+    _compact_run_layout(fig, "Run-over-run change (+ = colder)", 230, list(change["change"]), "Δ HDD")
     return fig
 
 

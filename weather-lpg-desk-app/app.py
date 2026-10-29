@@ -191,10 +191,10 @@ def hdd_kpi_card(label: str, kpis: dict | None) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1: US HDD BY PADD
 # ══════════════════════════════════════════════════════════════════════════════
-def us_weighted_card(kpis: dict | None, fcst_hdd, avg_hdd) -> str:
-    """Single L48 headline box: gas-weighted 14-day forecast HDD vs 10-yr avg,
-    with season-to-date (vs normal, rank) underneath."""
-    label = f"{US_WEIGHTED_LABEL} HDD"
+def us_hdd_card(label: str, kpis: dict | None, fcst_hdd, avg_hdd, small: bool = False) -> str:
+    """US HDD box: 14-day forecast HDD vs 10-yr avg, with season-to-date
+    (vs normal) underneath. Used full-size for the gas-weighted L48 headline
+    and `small` for the per-PADD boxes under it."""
     if fcst_hdd is None and kpis is None:
         return raw_kpi_card(label, "N/A", "kpi-card-neutral")
 
@@ -217,7 +217,8 @@ def us_weighted_card(kpis: dict | None, fcst_hdd, avg_hdd) -> str:
             season_html += f' · {sdelta:+.0f} vs normal'
         season_html += '</div>'
 
-    return (f'<div class="kpi-card {card_class}"><div class="kpi-label">{label}</div>'
+    size_class = " kpi-card-sm" if small else ""
+    return (f'<div class="kpi-card {card_class}{size_class}"><div class="kpi-label">{label}</div>'
             f'<div class="kpi-value">{value_str}</div>{delta_html}{season_html}</div>')
 
 
@@ -250,7 +251,8 @@ def render_us_hdd():
 
     _, box_col, _ = st.columns([1, 2, 1])
     with box_col:
-        st.markdown(us_weighted_card(us_kpis, us_fhdd, us_ahdd), unsafe_allow_html=True)
+        st.markdown(us_hdd_card(f"{US_WEIGHTED_LABEL} HDD", us_kpis, us_fhdd, us_ahdd),
+                    unsafe_allow_html=True)
     weight_set = gas_weight_season(us_kpis["as_of"].month) if us_kpis else "winter"
     st.caption(
         f"Gas-demand weighted ({weight_set} weights): "
@@ -263,6 +265,13 @@ def render_us_hdd():
     )
     if not selected_padds:
         st.info("Select at least one PADD.")
+    else:
+        padd_cols = st.columns(len(selected_padds))
+        for i, padd in enumerate(selected_padds):
+            kpis = compute_season_kpis(season_df, normal_df, history_df, "padd_region", padd)
+            fhdd, ahdd = _forecast_vs_10yr(season_df, history_df, "padd_region", padd)
+            with padd_cols[i]:
+                st.markdown(us_hdd_card(padd, kpis, fhdd, ahdd, small=True), unsafe_allow_html=True)
 
     st.divider()
 
@@ -277,9 +286,9 @@ def render_us_hdd():
         st.divider()
         st.markdown("##### Run Comparison — 5-day window totals (latest 3 model runs)")
         st.caption(
-            "Bars: total HDD per window for each run (darkest = latest). Below each: run-over-run "
-            "change (+ = newer run colder). Only dates covered by all 3 runs are summed, so runs "
-            "compare like-for-like."
+            "Each box: total HDD per window for each run (darkest = latest), with the run-over-run "
+            "change underneath (+ = newer run colder). Only dates covered by all 3 runs are summed, "
+            "so runs compare like-for-like."
         )
         names = [US_WEIGHTED_LABEL] + selected_padds
         cols2 = st.columns(min(len(names), 3))
@@ -288,9 +297,11 @@ def render_us_hdd():
             if totals.empty:
                 continue
             with cols2[i % len(cols2)]:
-                st.plotly_chart(make_hdd_run_totals_chart(totals, name), use_container_width=True)
-                st.plotly_chart(make_hdd_run_change_chart(run_over_run_change(totals), name),
-                                use_container_width=True)
+                with st.container(border=True):
+                    st.markdown(f"**{name}**")
+                    st.plotly_chart(make_hdd_run_totals_chart(totals, name), use_container_width=True)
+                    st.plotly_chart(make_hdd_run_change_chart(run_over_run_change(totals), name),
+                                    use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
