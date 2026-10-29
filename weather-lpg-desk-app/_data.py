@@ -32,6 +32,8 @@ from _config import (
     PANAMA_PRECIP_LOOKBACK_DAYS, PANAMA_PRECIP_FORECAST_DAYS,
     HURRICANE_BASINS,
     HDD_RANK_POOL_YEARS, hdd_season_day_index,
+    GAS_DEMAND_WEIGHTS, gas_weight_season, US_WEIGHTED_LABEL,
+    RUN_WINDOWS, RUN_TOTAL_LABEL,
 )
 
 # ─── Connection config ────────────────────────────────────────────────────────────
@@ -136,6 +138,118 @@ def load_hdd_season_history() -> pd.DataFrame:
     df["cumulative_hdd"] = pd.to_numeric(df["cumulative_hdd"], errors="coerce")
     df["delivery_date"] = pd.to_datetime(df["delivery_date"], errors="coerce")
     return df
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# US L48 GAS-DEMAND WEIGHTING + RUN-WINDOW TOTALS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _month_of(df: pd.DataFrame) -> pd.Series:
+    """Calendar month per row — from delivery_date, else from day_of_year."""
+    if "delivery_date" in df.columns:
+        return pd.to_datetime(df["delivery_date"]).dt.month
+    doy = pd.to_numeric(df["day_of_year"], errors="coerce").fillna(1).astype(int)
+    # non-leap reference year, same convention as the season-day-index helpers
+    return (pd.Timestamp("2001-01-01") + pd.to_timedelta(doy - 1, unit="D")).dt.month
+
+
+def gas_weighted_us(df: pd.DataFrame, value_cols: list[str], keys: list[str],
+                    padd_col: str = "padd_region") -> pd.DataFrame:
+    """Collapse per-PADD rows into one gas-demand-weighted US row per `keys`.
+
+    Weights come from GAS_DEMAND_WEIGHTS and depend on the row's calendar month
+    (winter vs summer set). Each value is a weighted *average* over the PADDs
+    that have a value for it, so a missing PADD doesn't pull the total down.
+    Output carries `padd_col` = US_WEIGHTED_LABEL so it plugs straight into the
+    existing per-PADD chart/KPI code.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=keys + value_cols + [padd_col])
+    d = df.copy()
+    months = _month_of(d)
+    d["_w"] = [GAS_DEMAND_WEIGHTS[gas_weight_season(m)].get(p, 0.0)
+               for p, m in zip(d[padd_col], months)]
+    agg_cols = []
+    for c in value_cols:
+        w = d["_w"].where(d[c].notna(), 0.0)
+        d[f"_num_{c}"] = d[c].fillna(0.0) * w
+        d[f"_den_{c}"] = w
+        agg_cols += [f"_num_{c}", f"_den_{c}"]
+    g = d.groupby(keys, dropna=False)[agg_cols].sum().reset_index()
+    for c in value_cols:
+        den = g[f"_den_{c}"]
+        g[c] = (g[f"_num_{c}"] / den).where(den > 0)
+    g = g[keys + value_cols]
+    g[padd_col] = US_WEIGHTED_LABEL
+    return g
+
+
+def build_weighted_us_frames(season_df, normal_df, history_df, run_df) -> dict[str, pd.DataFrame]:
+    """Gas-weighted US versions of the four US HDD frames, keyed like the inputs."""
+    return {
+        "season": gas_weighted_us(season_df, ["daily_hdd", "cumulative_hdd"],
+                                  ["model_label", "delivery_date"]),
+        "normal": gas_weighted_us(normal_df, ["daily_hdd_normal"], ["day_of_year"]),
+        "history": gas_weighted_us(history_df, ["daily_hdd", "cumulative_hdd"],
+                                   ["season_start_year", "season_label", "day_of_year", "delivery_date"]),
+        "run": gas_weighted_us(run_df, ["daily_hdd"],
+                               ["model_label", "run_ts", "run_rank", "run_label", "delivery_date"]),
+    }
+
+
+def run_window_totals(run_df: pd.DataFrame, padd: str, windows=RUN_WINDOWS,
+                      total_label: str = RUN_TOTAL_LABEL) -> pd.DataFrame:
+    """Per-run HDD totals over fixed forecast windows, plus an all-days total.
+
+    Windows are counted in days from the latest run's first forecast date, and
+    only dates every run covers are summed — older runs end earlier, so summing
+    each run over its own dates would make them look milder purely from having
+    fewer days. Returns long rows: run_rank, run_label, window, total, n_days.
+    """
+    cols = ["run_rank", "run_label", "window", "total", "n_days"]
+    pdf = run_df[run_df["padd_region"] == padd] if "padd_region" in run_df.columns else run_df
+    pdf = pdf.dropna(subset=["run_rank", "delivery_date", "daily_hdd"])
+    if pdf.empty:
+        return pd.DataFrame(columns=cols)
+
+    date_sets = [set(g["delivery_date"]) for _, g in pdf.groupby("run_rank")]
+    common = set.intersection(*date_sets)
+    anchor = pdf.loc[pdf["run_rank"] == pdf["run_rank"].min(), "delivery_date"].min()
+    pdf = pdf[pdf["delivery_date"].isin(common) & (pdf["delivery_date"] >= anchor)].copy()
+    if pdf.empty:
+        return pd.DataFrame(columns=cols)
+    pdf["offset"] = (pdf["delivery_date"] - anchor).dt.days
+
+    max_day = max(hi for _, _, hi in windows)
+    spans = [(label, lo, hi) for label, lo, hi in windows] + [(total_label, 0, max_day)]
+    rows = []
+    for rank, rdf in pdf.groupby("run_rank"):
+        run_label = rdf["run_label"].iloc[0]
+        for label, lo, hi in spans:
+            sel = rdf[(rdf["offset"] >= lo) & (rdf["offset"] <= hi)]
+            rows.append((int(rank), run_label, label,
+                         float(sel["daily_hdd"].sum()) if not sel.empty else np.nan, len(sel)))
+    return pd.DataFrame(rows, columns=cols)
+
+
+def run_over_run_change(totals: pd.DataFrame) -> pd.DataFrame:
+    """Run-over-run change in window totals: each run minus the next-older run.
+
+    Positive = the newer run is colder (more HDD). Returns long rows:
+    pair (e.g. 'Latest vs -12h'), window, change.
+    """
+    cols = ["pair", "window", "change"]
+    if totals.empty:
+        return pd.DataFrame(columns=cols)
+    ranks = sorted(totals["run_rank"].unique())
+    labels = totals.drop_duplicates("run_rank").set_index("run_rank")["run_label"]
+    rows = []
+    for newer, older in zip(ranks[:-1], ranks[1:]):
+        a = totals[totals["run_rank"] == newer].set_index("window")["total"]
+        b = totals[totals["run_rank"] == older].set_index("window")["total"]
+        for window in a.index:
+            rows.append((f"{labels[newer]} vs {labels[older]}", window, float(a[window] - b[window])))
+    return pd.DataFrame(rows, columns=cols)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

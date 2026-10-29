@@ -167,23 +167,48 @@ def make_hdd_season_chart(df: pd.DataFrame, padd: str, normal_df: pd.DataFrame =
     return fig
 
 
-def make_hdd_comparison_chart(df: pd.DataFrame, padd: str) -> go.Figure:
-    """Run comparison — daily HDD bars for the latest 3 model runs."""
-    fig = _base_fig(f"Daily HDD Forecast — {padd}", height=320)
-    padd_data = df[df["padd_region"] == padd] if "padd_region" in df.columns else df
-    base = PADD_COLORS.get(padd, INK_MUTED)
-    opacities = {1: 1.0, 2: 0.6, 3: 0.35}
+_RUN_OPACITY = {1: 1.0, 2: 0.6, 3: 0.35}
 
-    for rank in sorted(padd_data["run_rank"].dropna().unique()):
-        rdf = padd_data[padd_data["run_rank"] == rank]
-        label = rdf["run_label"].iloc[0] if not rdf.empty else f"Run {rank}"
+
+def make_hdd_run_totals_chart(totals: pd.DataFrame, padd: str) -> go.Figure:
+    """Window totals per model run — one group of bars per forecast window
+    (Day 0-4, 5-9, 10-14, Total), one bar per run (latest = darkest)."""
+    fig = _base_fig(f"HDD by Forecast Window — {padd}", height=320)
+    base = PADD_COLORS.get(padd, INK_SECONDARY)
+
+    for rank in sorted(totals["run_rank"].unique()):
+        rdf = totals[totals["run_rank"] == rank]
         fig.add_trace(go.Bar(
-            x=rdf["delivery_date"], y=rdf["daily_hdd"],
-            name=label, marker_color=base, opacity=opacities.get(int(rank), 0.3),
+            x=rdf["window"], y=rdf["total"], name=rdf["run_label"].iloc[0],
+            marker_color=base, opacity=_RUN_OPACITY.get(int(rank), 0.3),
+            text=[f"{v:.0f}" if pd.notna(v) else "" for v in rdf["total"]], textposition="outside",
+            customdata=rdf["n_days"],
+            hovertemplate="%{x} · %{y:.1f} HDD (%{customdata} days)<extra>%{fullData.name}</extra>",
         ))
 
     fig.update_layout(barmode="group")
     fig.update_yaxes(title_text="HDD (°C-days)")
+    return fig
+
+
+def make_hdd_run_change_chart(change: pd.DataFrame, padd: str) -> go.Figure:
+    """Run-over-run change in each window total (newer minus older run).
+    Positive = newer run is colder."""
+    fig = _base_fig(f"Run-over-Run Change — {padd}", height=280)
+    base = PADD_COLORS.get(padd, INK_SECONDARY)
+
+    for i, pair in enumerate(change["pair"].unique()):
+        pdf = change[change["pair"] == pair]
+        fig.add_trace(go.Bar(
+            x=pdf["window"], y=pdf["change"], name=pair,
+            marker_color=base, opacity=_RUN_OPACITY.get(i + 1, 0.3),
+            text=[f"{v:+.1f}" for v in pdf["change"]], textposition="outside",
+            hovertemplate="%{x} · %{y:+.1f} HDD<extra>%{fullData.name}</extra>",
+        ))
+
+    fig.add_hline(y=0, line_color=BASELINE, line_width=1)
+    fig.update_layout(barmode="group")
+    fig.update_yaxes(title_text="Δ HDD (+ = colder)")
     return fig
 
 

@@ -108,6 +108,45 @@ PADD_REGIONS: dict[str, dict] = {
 
 PADD_COLORS: dict[str, str] = dict(zip(PADD_REGIONS.keys(), CATEGORICAL))
 
+# ─── L48 gas-demand weights (PLACEHOLDER — replace with the desk's numbers) ───
+# Used to collapse the five PADD HDD series into one "US (gas-weighted)" series.
+# Each season's weights must sum to 1.0 (they are re-normalised over whichever
+# PADDs actually have data, so a missing PADD can't drag the total down).
+# These are an initial guess, NOT desk-supplied: heating-load weights lean
+# Midwest/Northeast in winter; power-burn pushes weight to the South in summer.
+GAS_DEMAND_WEIGHTS: dict[str, dict[str, float]] = {
+    "winter": {
+        "PADD 1 - Northeast":     0.27,
+        "PADD 2 - Midwest":       0.38,
+        "PADD 3 - South Central": 0.18,
+        "PADD 4 - Mountain":      0.06,
+        "PADD 5 - West":          0.11,
+    },
+    "summer": {
+        "PADD 1 - Northeast":     0.18,
+        "PADD 2 - Midwest":       0.22,
+        "PADD 3 - South Central": 0.38,
+        "PADD 4 - Mountain":      0.05,
+        "PADD 5 - West":          0.17,
+    },
+}
+# Months that use each weight set. The HDD season is Oct-Mar, so the summer set
+# only matters if HDD data ever extends outside it.
+GAS_WINTER_MONTHS = {10, 11, 12, 1, 2, 3}
+US_WEIGHTED_LABEL = "US L48 (gas-weighted)"
+
+
+def gas_weight_season(month: int) -> str:
+    """'winter' or 'summer' weight set for a calendar month (1-12)."""
+    return "winter" if int(month) in GAS_WINTER_MONTHS else "summer"
+
+
+# Run-comparison windows, as (label, first_day, last_day) in days after the
+# latest run's first forecast day (day 0). A "Total" bar spanning every day is
+# added after these.
+RUN_WINDOWS = [("Day 0-4", 0, 4), ("Day 5-9", 5, 9), ("Day 10-14", 10, 14)]
+RUN_TOTAL_LABEL = "Total"
+
 US_LAT_MIN, US_LAT_MAX = 24.0, 50.0
 US_LON_MIN, US_LON_MAX = -125.0, -65.0
 

@@ -25,7 +25,7 @@ from _config import (
     PADD3_COASTAL_CITIES, DEFAULT_PADD3_CITIES,
     FREEZE_THRESHOLD_C,
     NAFRICA_WIND_CORRIDOR, DEFAULT_NAFRICA_PORTS, WIND_GALE_MS,
-    HDD_BASE_TEMP,
+    HDD_BASE_TEMP, GAS_DEMAND_WEIGHTS, US_WEIGHTED_LABEL, gas_weight_season,
     GATUN_ANALOG_YEARS, GATUN_RESTRICTION_FT, GATUN_RATE_SURCHARGE_FT,
     GATUN_FORECAST_METHODS, GATUN_COMPOSITE_YEARS, GATUN_FALLBACK_ANALOG_YEARS,
     GATUN_ENSO_HORIZON_DAYS, GATUN_ENSO_INDEX_BAND, GATUN_ENSO_DECAY_MONTHS,
@@ -37,7 +37,7 @@ from _config import (
 from _data import (
     load_hdd_season, load_hdd_normal_daily, load_hdd_run_comparison, load_hdd_season_history,
     load_asia_hdd_season, load_asia_hdd_normal, load_asia_hdd_season_history, load_asia_hdd_run_comparison,
-    compute_season_kpis,
+    compute_season_kpis, build_weighted_us_frames, run_window_totals, run_over_run_change,
     load_india_precip_anomaly,
     load_gatun_lake_levels, build_gatun_analog_overlays, build_gatun_analog_extension,
     build_gatun_composite_forecast, build_gatun_enso_index_forecast,
@@ -49,7 +49,7 @@ from _data import (
 )
 from _ai_lpg_brief import generate_lpg_brief, brief_to_html_bullets
 from _charts import (
-    make_hdd_season_chart, make_hdd_comparison_chart,
+    make_hdd_season_chart, make_hdd_run_totals_chart, make_hdd_run_change_chart,
     make_asia_hdd_season_chart, make_asia_hdd_bar_chart,
     make_asia_hdd_region_chart, make_asia_hdd_comparison_chart,
 
@@ -191,8 +191,38 @@ def hdd_kpi_card(label: str, kpis: dict | None) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1: US HDD BY PADD
 # ══════════════════════════════════════════════════════════════════════════════
+def us_weighted_card(kpis: dict | None, fcst_hdd, avg_hdd) -> str:
+    """Single L48 headline box: gas-weighted 14-day forecast HDD vs 10-yr avg,
+    with season-to-date (vs normal, rank) underneath."""
+    label = f"{US_WEIGHTED_LABEL} HDD"
+    if fcst_hdd is None and kpis is None:
+        return raw_kpi_card(label, "N/A", "kpi-card-neutral")
+
+    value_str = f"{fcst_hdd:.0f} HDD" if fcst_hdd is not None else "N/A"
+    card_class, delta_html = "kpi-card-neutral", ""
+    if fcst_hdd is not None and avg_hdd is not None:
+        delta = fcst_hdd - avg_hdd
+        card_class = "kpi-card-cool" if delta > 0 else ("kpi-card-warm" if delta < 0 else "kpi-card-neutral")
+        d_cls = "kpi-delta-up" if delta > 0 else ("kpi-delta-down" if delta < 0 else "kpi-delta-flat")
+        arrow = "▲" if delta > 0 else ("▼" if delta < 0 else "●")
+        word = "colder" if delta > 0 else ("milder" if delta < 0 else "on avg")
+        delta_html = (f'<div class="kpi-delta {d_cls}">{arrow} {abs(delta):.0f} {word} '
+                      f'vs {avg_hdd:.0f} (10-yr avg) · next 14 days</div>')
+
+    season_html = ""
+    if kpis is not None:
+        season_html = f'<div class="kpi-rank">Season to date: {kpis["cumulative_to_date"]:.0f} HDD'
+        sdelta = kpis.get("delta_vs_normal")
+        if sdelta is not None and not np.isnan(sdelta):
+            season_html += f' · {sdelta:+.0f} vs normal'
+        season_html += '</div>'
+
+    return (f'<div class="kpi-card {card_class}"><div class="kpi-label">{label}</div>'
+            f'<div class="kpi-value">{value_str}</div>{delta_html}{season_html}</div>')
+
+
 def render_us_hdd():
-    st.markdown("#### US HEATING DEGREE DAYS BY PADD")
+    st.markdown("#### US HEATING DEGREE DAYS")
     st.caption(f"Base {HDD_BASE_TEMP:.0f}°C. Season Oct 1 – Mar 31. Source: ERA5 + EC-ens forecast.")
 
     try:
@@ -204,54 +234,63 @@ def render_us_hdd():
         st.error(f"Failed to load US HDD data: {e}")
         return
 
-    selected_padds = st.multiselect(
-        "PADDs", list(PADD_REGIONS.keys()), list(PADD_REGIONS.keys()),
-        key="us_hdd_padds", label_visibility="collapsed",
-    )
-    if not selected_padds:
-        st.info("Select at least one PADD.")
-        return
-
-    padd_kpis = {padd: compute_season_kpis(season_df, normal_df, history_df, "padd_region", padd)
-                 for padd in selected_padds}
+    # L48 total: always all five PADDs, whatever the PADD picker below shows.
+    us = build_weighted_us_frames(season_df, normal_df, history_df, run_df)
+    us_kpis = compute_season_kpis(us["season"], us["normal"], us["history"],
+                                  "padd_region", US_WEIGHTED_LABEL)
+    us_fhdd, us_ahdd = _forecast_vs_10yr(us["season"], us["history"], "padd_region", US_WEIGHTED_LABEL)
 
     if not is_in_hdd_season():
-        as_of = next((k["as_of"] for k in padd_kpis.values() if k), None)
+        as_of = us_kpis["as_of"] if us_kpis else None
         label = hdd_season_label(hdd_season_start_year(as_of)) if as_of is not None else "last winter"
         st.markdown(
             status_banner(f"Not in HDD seasonality — showing final values for {label} below.", "warning"),
             unsafe_allow_html=True,
         )
 
-    st.markdown("##### Season")
-    kpi_cols = st.columns(len(selected_padds))
-    for i, padd in enumerate(selected_padds):
-        with kpi_cols[i % len(kpi_cols)]:
-            st.markdown(hdd_kpi_card(padd, padd_kpis[padd]), unsafe_allow_html=True)
+    _, box_col, _ = st.columns([1, 2, 1])
+    with box_col:
+        st.markdown(us_weighted_card(us_kpis, us_fhdd, us_ahdd), unsafe_allow_html=True)
+    weight_set = gas_weight_season(us_kpis["as_of"].month) if us_kpis else "winter"
+    st.caption(
+        f"Gas-demand weighted ({weight_set} weights): "
+        + ", ".join(f"{p.split(' - ')[0]} {w:.0%}" for p, w in GAS_DEMAND_WEIGHTS[weight_set].items())
+    )
 
-    st.markdown("##### Forecast (14-day)")
-    fcst_cols = st.columns(len(selected_padds))
-    for i, padd in enumerate(selected_padds):
-        with fcst_cols[i % len(fcst_cols)]:
-            fhdd, ahdd = _forecast_vs_10yr(season_df, history_df, "padd_region", padd)
-            st.markdown(forecast_kpi_card(padd, fhdd, ahdd), unsafe_allow_html=True)
+    selected_padds = st.multiselect(
+        "PADDs", list(PADD_REGIONS.keys()), list(PADD_REGIONS.keys()),
+        key="us_hdd_padds", label_visibility="collapsed",
+    )
+    if not selected_padds:
+        st.info("Select at least one PADD.")
 
     st.divider()
 
-    cols = st.columns(min(len(selected_padds), 3))
-    for i, padd in enumerate(selected_padds):
-        with cols[i % len(cols)]:
-            fig = make_hdd_season_chart(season_df, padd, normal_df, history_df)
-            st.plotly_chart(fig, use_container_width=True)
+    if selected_padds:
+        cols = st.columns(min(len(selected_padds), 3))
+        for i, padd in enumerate(selected_padds):
+            with cols[i % len(cols)]:
+                fig = make_hdd_season_chart(season_df, padd, normal_df, history_df)
+                st.plotly_chart(fig, use_container_width=True)
 
     if not run_df.empty:
         st.divider()
-        st.markdown("##### Run Comparison (latest 3 model runs)")
-        cols2 = st.columns(min(len(selected_padds), 3))
-        for i, padd in enumerate(selected_padds):
+        st.markdown("##### Run Comparison — 5-day window totals (latest 3 model runs)")
+        st.caption(
+            "Bars: total HDD per window for each run (darkest = latest). Below each: run-over-run "
+            "change (+ = newer run colder). Only dates covered by all 3 runs are summed, so runs "
+            "compare like-for-like."
+        )
+        names = [US_WEIGHTED_LABEL] + selected_padds
+        cols2 = st.columns(min(len(names), 3))
+        for i, name in enumerate(names):
+            totals = run_window_totals(us["run"] if name == US_WEIGHTED_LABEL else run_df, name)
+            if totals.empty:
+                continue
             with cols2[i % len(cols2)]:
-                fig = make_hdd_comparison_chart(run_df, padd)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(make_hdd_run_totals_chart(totals, name), use_container_width=True)
+                st.plotly_chart(make_hdd_run_change_chart(run_over_run_change(totals), name),
+                                use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
