@@ -36,7 +36,7 @@ from _config import (
 )
 from _data import (
     load_hdd_season, load_hdd_normal_daily, load_hdd_run_comparison, load_hdd_season_history,
-    load_asia_hdd_season, load_asia_hdd_normal, load_asia_hdd_season_history,
+    load_asia_hdd_season, load_asia_hdd_normal, load_asia_hdd_season_history, load_asia_hdd_run_comparison,
     compute_season_kpis,
     load_india_precip_anomaly,
     load_gatun_lake_levels, build_gatun_analog_overlays, build_gatun_analog_extension,
@@ -51,6 +51,8 @@ from _ai_lpg_brief import generate_lpg_brief, brief_to_html_bullets
 from _charts import (
     make_hdd_season_chart, make_hdd_comparison_chart,
     make_asia_hdd_season_chart, make_asia_hdd_bar_chart,
+    make_asia_hdd_region_chart, make_asia_hdd_comparison_chart,
+
     make_india_precip_timeseries, make_india_precip_deviation_chart,
     make_gatun_lake_chart, make_gatun_enso_index_chart, make_gatun_composite_chart,
     make_panama_precip_chart, make_panama_precip_departure_chart,
@@ -101,6 +103,44 @@ def status_banner(text: str, level: str = "warning") -> str:
     """Alert banner — bold text tag + label, never color alone (status tokens are reserved)."""
     tag = _STATUS_TAGS.get(level, "Notice")
     return f'<div class="status-banner status-banner-{level}"><span class="status-tag">{tag}</span>{text}</div>'
+
+
+def forecast_kpi_card(label: str, fcst_hdd, avg_hdd) -> str:
+    """14-day forecast KPI card — styled identically to the season KPI cards."""
+    if fcst_hdd is None:
+        return raw_kpi_card(label, "N/A", "kpi-card-neutral")
+    value_str = f"{fcst_hdd:.0f} HDD"
+    if avg_hdd is None:
+        return raw_kpi_card(label, value_str, "kpi-card-neutral")
+    delta = fcst_hdd - avg_hdd
+    card_class = "kpi-card-cool" if delta > 0 else ("kpi-card-warm" if delta < 0 else "kpi-card-neutral")
+    d_cls = "kpi-delta-up" if delta > 0 else ("kpi-delta-down" if delta < 0 else "kpi-delta-flat")
+    arrow = "\u25b2" if delta > 0 else ("\u25bc" if delta < 0 else "\u25cf")
+    word = "colder" if delta > 0 else ("milder" if delta < 0 else "on avg")
+    delta_html = f'<div class="kpi-delta {d_cls}">{arrow} {abs(delta):.0f} {word} vs {avg_hdd:.0f} (10-yr avg)</div>'
+    return (f'<div class="kpi-card {card_class}"><div class="kpi-label">{label}</div>'
+            f'<div class="kpi-value">{value_str}</div>{delta_html}</div>')
+
+
+def _forecast_vs_10yr(season_df, history_df, group_col, group_value, n_years=10):
+    """(forecast_14d_hdd, ten_yr_avg_hdd) for the same day-of-year window."""
+    sdf = season_df[season_df[group_col] == group_value] if group_col in season_df.columns else season_df
+    fcst = sdf[~sdf["model_label"].str.contains("Actual", na=False)]
+    if fcst.empty:
+        return None, None
+    fcst_total = float(fcst["daily_hdd"].sum())
+    fcst_doys = set(pd.to_datetime(fcst["delivery_date"]).dt.dayofyear)
+    hdf = history_df[history_df[group_col] == group_value] if group_col in history_df.columns else history_df
+    if hdf.empty:
+        return fcst_total, None
+    years = sorted(hdf["season_start_year"].dropna().unique())[-n_years:]
+    yr_totals = []
+    for yr in years:
+        ydf = hdf[(hdf["season_start_year"] == yr) & (hdf["day_of_year"].isin(fcst_doys))]
+        if not ydf.empty:
+            yr_totals.append(float(ydf["daily_hdd"].sum()))
+    avg = sum(yr_totals) / len(yr_totals) if yr_totals else None
+    return fcst_total, avg
 
 
 def _ordinal(n: int) -> str:
@@ -183,10 +223,18 @@ def render_us_hdd():
             unsafe_allow_html=True,
         )
 
+    st.markdown("##### Season")
     kpi_cols = st.columns(len(selected_padds))
     for i, padd in enumerate(selected_padds):
         with kpi_cols[i % len(kpi_cols)]:
             st.markdown(hdd_kpi_card(padd, padd_kpis[padd]), unsafe_allow_html=True)
+
+    st.markdown("##### Forecast (14-day)")
+    fcst_cols = st.columns(len(selected_padds))
+    for i, padd in enumerate(selected_padds):
+        with fcst_cols[i % len(fcst_cols)]:
+            fhdd, ahdd = _forecast_vs_10yr(season_df, history_df, "padd_region", padd)
+            st.markdown(forecast_kpi_card(padd, fhdd, ahdd), unsafe_allow_html=True)
 
     st.divider()
 
@@ -217,6 +265,7 @@ def render_asia_hdd():
         season_df = load_asia_hdd_season()
         normal_df = load_asia_hdd_normal()
         history_df = load_asia_hdd_season_history()
+        run_df = load_asia_hdd_run_comparison()
     except Exception as e:
         st.error(f"Failed to load Asia HDD data: {e}")
         return
@@ -240,18 +289,38 @@ def render_asia_hdd():
             unsafe_allow_html=True,
         )
 
+    st.markdown("##### Season")
     kpi_cols = st.columns(len(selected))
     for i, region in enumerate(selected):
         with kpi_cols[i % len(kpi_cols)]:
             st.markdown(hdd_kpi_card(region, region_kpis[region]), unsafe_allow_html=True)
 
+    st.markdown("##### Forecast (14-day)")
+    fcst_cols = st.columns(len(selected))
+    for i, region in enumerate(selected):
+        with fcst_cols[i % len(fcst_cols)]:
+            fhdd, ahdd = _forecast_vs_10yr(season_df, history_df, "region", region)
+            st.markdown(forecast_kpi_card(region, fhdd, ahdd), unsafe_allow_html=True)
+
     st.divider()
 
-    fig = make_asia_hdd_season_chart(season_df, selected, normal_df, history_df)
-    st.plotly_chart(fig, use_container_width=True)
+    # Per-region cumulative HDD charts (mirrors US PADD layout)
+    cols = st.columns(min(len(selected), 3))
+    for i, region in enumerate(selected):
+        with cols[i % len(cols)]:
+            fig = make_asia_hdd_region_chart(season_df, region, normal_df, history_df)
+            st.plotly_chart(fig, use_container_width=True)
 
-    fig2 = make_asia_hdd_bar_chart(season_df, selected)
-    st.plotly_chart(fig2, use_container_width=True)
+    # Run comparison (latest 3 model runs) — per region
+    if not run_df.empty:
+        st.divider()
+        st.markdown("##### Run Comparison (latest 3 model runs)")
+        cols2 = st.columns(min(len(selected), 3))
+        for i, region in enumerate(selected):
+            with cols2[i % len(cols2)]:
+                fig = make_asia_hdd_comparison_chart(run_df, region)
+                st.plotly_chart(fig, use_container_width=True)
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -17,7 +17,7 @@ from _config import (
     GATUN_RATE_SURCHARGE_FT, GATUN_RESTRICTION_FT,
     WIND_CAUTION_MS, WIND_WARNING_MS, WIND_GALE_MS,
     FREEZE_THRESHOLD_C, FROST_THRESHOLD_C,
-    HDD_HISTORY_COLORS, HDD_OVERLAY_YEARS, hdd_season_label,
+    HDD_HISTORY_COLORS, HDD_OVERLAY_YEARS, HDD_AVG_YEARS, hdd_season_label,
 )
 from _style import (
     PLOTLY_LAYOUT, GEO_LAYOUT, INK_PRIMARY, INK_SECONDARY, INK_MUTED, GRIDLINE,
@@ -76,6 +76,43 @@ def _add_hdd_history_overlay(fig: go.Figure, history_df: pd.DataFrame, group_col
         ))
 
 
+def _add_hdd_5yr_avg_line(fig: go.Figure, history_df: pd.DataFrame, group_col: str, group_value: str,
+                           season_year: int, avg_years: int = HDD_AVG_YEARS,
+                           showlegend: bool = True) -> None:
+    """Overlay the average cumulative HDD of the last N completed winters as a
+    single reference line — thicker dashed, distinct from the individual prior-
+    winter overlays so the reader can quickly compare the current season to
+    'recent normal'."""
+    if history_df is None or history_df.empty:
+        return
+    hdf = history_df[history_df[group_col] == group_value] if group_col in history_df.columns else history_df
+    if hdf.empty:
+        return
+    years = sorted(hdf["season_start_year"].dropna().unique())[-avg_years:]
+    if len(years) < 2:
+        return
+    frames = []
+    for yr in years:
+        ydf = hdf[hdf["season_start_year"] == yr].copy()
+        if ydf.empty:
+            continue
+        ydf["date"] = _doy_to_season_date(ydf["day_of_year"], season_year)
+        # Ensure unique dates per year (take last cumulative value per date)
+        series = ydf.groupby("date")["cumulative_hdd"].last()
+        frames.append(series.rename(yr))
+    if not frames:
+        return
+    avg = pd.concat(frames, axis=1).mean(axis=1).dropna()
+    if avg.empty:
+        return
+    fig.add_trace(go.Scatter(
+        x=avg.index, y=avg.values,
+        name=f"{len(years)}-yr avg", mode="lines",
+        line=dict(color=INK_SECONDARY, dash="dashdot", width=2.2),
+        opacity=0.85, showlegend=showlegend,
+    ))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1: US HDD SEASON CHARTS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -97,7 +134,21 @@ def make_hdd_season_chart(df: pd.DataFrame, padd: str, normal_df: pd.DataFrame =
             line=dict(color=color, dash=dash, width=2),
         ))
 
+    # Bridge: connect last actual to first forecast with a thin dashed segment
+    actual_sub = padd_data[padd_data["model_label"].str.contains("Actual", na=False)]
+    fcst_sub = padd_data[~padd_data["model_label"].str.contains("Actual", na=False)]
+    if not actual_sub.empty and not fcst_sub.empty:
+        la = actual_sub.sort_values("delivery_date").iloc[-1]
+        ff = fcst_sub.sort_values("delivery_date").iloc[0]
+        fig.add_trace(go.Scatter(
+            x=[la["delivery_date"], ff["delivery_date"]],
+            y=[la["cumulative_hdd"], ff["cumulative_hdd"]],
+            mode="lines", line=dict(color=color, dash="dash", width=2),
+            showlegend=False, hoverinfo="skip",
+        ))
+
     _add_hdd_history_overlay(fig, history_df, "padd_region", padd, season_year)
+    _add_hdd_5yr_avg_line(fig, history_df, "padd_region", padd, season_year)
 
     if normal_df is not None and not normal_df.empty:
         ndf = normal_df[normal_df["padd_region"] == padd] if "padd_region" in normal_df.columns else normal_df
@@ -165,7 +216,7 @@ def make_asia_hdd_season_chart(df: pd.DataFrame, selected_regions: list[str],
             if not ndf.empty:
                 ndf = ndf.copy()
                 ndf["date"] = _doy_to_season_date(ndf["day_of_year"], season_year)
-                ndf = ndf.sort_values("date")   # season order (Oct1->Mar31), not raw day_of_year
+                ndf = ndf.sort_values("date")
                 ndf["cumulative_hdd_normal"] = ndf["daily_hdd_normal"].cumsum()
                 fig.add_trace(go.Scatter(
                     x=ndf["date"], y=ndf["cumulative_hdd_normal"],
@@ -174,6 +225,203 @@ def make_asia_hdd_season_chart(df: pd.DataFrame, selected_regions: list[str],
                     opacity=0.6, showlegend=False,
                 ))
 
+    fig.update_yaxes(title_text="HDD (°C-days)")
+    return fig
+
+
+def make_asia_hdd_region_chart(df: pd.DataFrame, region: str,
+                                normal_df: pd.DataFrame = None,
+                                history_df: pd.DataFrame = None) -> go.Figure:
+    """Cumulative HDD season chart for a single Asia region — mirrors make_hdd_season_chart."""
+    fig = _base_fig(f"Cumulative HDD — {region}")
+    rdf = df[df["region"] == region] if "region" in df.columns else df
+    color = ASIA_COLORS.get(region, INK_MUTED)
+    season_year = _season_start_year(rdf["delivery_date"])
+
+    for model in rdf["model_label"].unique():
+        mdf = rdf[rdf["model_label"] == model]
+        dash = "solid" if "Actual" in model else "dash"
+        fig.add_trace(go.Scatter(
+            x=mdf["delivery_date"], y=mdf["cumulative_hdd"],
+            name=model, mode="lines",
+            line=dict(color=color, dash=dash, width=2),
+        ))
+
+    # Bridge: connect last actual to first forecast
+    actual_sub = rdf[rdf["model_label"].str.contains("Actual", na=False)]
+    fcst_sub = rdf[~rdf["model_label"].str.contains("Actual", na=False)]
+    if not actual_sub.empty and not fcst_sub.empty:
+        la = actual_sub.sort_values("delivery_date").iloc[-1]
+        ff = fcst_sub.sort_values("delivery_date").iloc[0]
+        fig.add_trace(go.Scatter(
+            x=[la["delivery_date"], ff["delivery_date"]],
+            y=[la["cumulative_hdd"], ff["cumulative_hdd"]],
+            mode="lines", line=dict(color=color, dash="dash", width=2),
+            showlegend=False, hoverinfo="skip",
+        ))
+
+    _add_hdd_history_overlay(fig, history_df, "region", region, season_year)
+    _add_hdd_5yr_avg_line(fig, history_df, "region", region, season_year)
+
+    if normal_df is not None and not normal_df.empty:
+        ndf = normal_df[normal_df["region"] == region] if "region" in normal_df.columns else normal_df
+        if not ndf.empty:
+            ndf = ndf.copy()
+            ndf["date"] = _doy_to_season_date(ndf["day_of_year"], season_year)
+            ndf = ndf.sort_values("date")
+            ndf["cumulative_hdd_normal"] = ndf["daily_hdd_normal"].cumsum()
+            fig.add_trace(go.Scatter(
+                x=ndf["date"], y=ndf["cumulative_hdd_normal"],
+                name="Normal", mode="lines",
+                line=dict(color=INK_MUTED, dash="dot", width=1.5),
+            ))
+
+    fig.update_yaxes(title_text="HDD (°C-days)")
+    return fig
+
+
+def make_asia_hdd_comparison_chart(df: pd.DataFrame, region: str) -> go.Figure:
+    """Run comparison — daily HDD bars for the latest 3 model runs, single Asia region."""
+    fig = _base_fig(f"Daily HDD Forecast — {region}", height=320)
+    rdf = df[df["region"] == region] if "region" in df.columns else df
+    base = ASIA_COLORS.get(region, INK_MUTED)
+    opacities = {1: 1.0, 2: 0.6, 3: 0.35}
+
+    for rank in sorted(rdf["run_rank"].dropna().unique()):
+        rrdf = rdf[rdf["run_rank"] == rank]
+        label = rrdf["run_label"].iloc[0] if not rrdf.empty else f"Run {rank}"
+        fig.add_trace(go.Bar(
+            x=rrdf["delivery_date"], y=rrdf["daily_hdd"],
+            name=label, marker_color=base, opacity=opacities.get(int(rank), 0.3),
+        ))
+
+    fig.update_layout(barmode="group")
+    fig.update_yaxes(title_text="HDD (°C-days)")
+    return fig
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 10-YEAR COMPARISON CHARTS (toggle view)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def make_hdd_10yr_comparison_chart(df: pd.DataFrame, padd: str,
+                                    history_df: pd.DataFrame,
+                                    n_years: int = 10) -> go.Figure:
+    """Current season + forecast vs last N winters' min/max band and average."""
+    fig = _base_fig(f"Forecast vs {n_years}-yr Range — {padd}")
+    color = PADD_COLORS.get(padd, INK_MUTED)
+    padd_data = df[df["padd_region"] == padd] if "padd_region" in df.columns else df
+    season_year = _season_start_year(padd_data["delivery_date"])
+
+    hdf = history_df[history_df["padd_region"] == padd] if "padd_region" in history_df.columns else history_df
+    if not hdf.empty:
+        years = sorted(hdf["season_start_year"].dropna().unique())[-n_years:]
+        series_list = []
+        for yr in years:
+            ydf = hdf[hdf["season_start_year"] == yr].copy()
+            if ydf.empty:
+                continue
+            ydf["date"] = _doy_to_season_date(ydf["day_of_year"], season_year)
+            series_list.append(ydf.groupby("date")["cumulative_hdd"].last().rename(yr))
+        if series_list:
+            combined = pd.concat(series_list, axis=1)
+            avg = combined.mean(axis=1).dropna().sort_index()
+            band_min = combined.min(axis=1).dropna().sort_index()
+            band_max = combined.max(axis=1).dropna().sort_index()
+            fig.add_trace(go.Scatter(
+                x=list(band_max.index) + list(band_min.index[::-1]),
+                y=list(band_max.values) + list(band_min.values[::-1]),
+                fill="toself", fillcolor="rgba(180,180,180,0.25)",
+                line=dict(color="rgba(180,180,180,0)"),
+                name=f"{n_years}-yr range", hoverinfo="skip",
+            ))
+            fig.add_trace(go.Scatter(
+                x=avg.index, y=avg.values,
+                name=f"{n_years}-yr avg", mode="lines",
+                line=dict(color=INK_SECONDARY, dash="dashdot", width=2),
+            ))
+
+    for model in padd_data["model_label"].unique():
+        mdf = padd_data[padd_data["model_label"] == model]
+        dash = "solid" if "Actual" in model else "dash"
+        label = "Current (Actual)" if "Actual" in model else "Current (Forecast)"
+        fig.add_trace(go.Scatter(
+            x=mdf["delivery_date"], y=mdf["cumulative_hdd"],
+            name=label, mode="lines",
+            line=dict(color=color, dash=dash, width=2.5),
+        ))
+    actual_sub = padd_data[padd_data["model_label"].str.contains("Actual", na=False)]
+    fcst_sub = padd_data[~padd_data["model_label"].str.contains("Actual", na=False)]
+    if not actual_sub.empty and not fcst_sub.empty:
+        la = actual_sub.sort_values("delivery_date").iloc[-1]
+        ff = fcst_sub.sort_values("delivery_date").iloc[0]
+        fig.add_trace(go.Scatter(
+            x=[la["delivery_date"], ff["delivery_date"]],
+            y=[la["cumulative_hdd"], ff["cumulative_hdd"]],
+            mode="lines", line=dict(color=color, dash="dash", width=2.5),
+            showlegend=False, hoverinfo="skip",
+        ))
+    fig.update_yaxes(title_text="HDD (°C-days)")
+    return fig
+
+
+def make_asia_hdd_10yr_comparison_chart(df: pd.DataFrame, region: str,
+                                        history_df: pd.DataFrame,
+                                        n_years: int = 10) -> go.Figure:
+    """Current season + forecast vs last N winters' min/max band and average (Asia)."""
+    fig = _base_fig(f"Forecast vs {n_years}-yr Range — {region}")
+    color = ASIA_COLORS.get(region, INK_MUTED)
+    rdf = df[df["region"] == region] if "region" in df.columns else df
+    season_year = _season_start_year(rdf["delivery_date"])
+
+    hdf = history_df[history_df["region"] == region] if "region" in history_df.columns else history_df
+    if not hdf.empty:
+        years = sorted(hdf["season_start_year"].dropna().unique())[-n_years:]
+        series_list = []
+        for yr in years:
+            ydf = hdf[hdf["season_start_year"] == yr].copy()
+            if ydf.empty:
+                continue
+            ydf["date"] = _doy_to_season_date(ydf["day_of_year"], season_year)
+            series_list.append(ydf.groupby("date")["cumulative_hdd"].last().rename(yr))
+        if series_list:
+            combined = pd.concat(series_list, axis=1)
+            avg = combined.mean(axis=1).dropna().sort_index()
+            band_min = combined.min(axis=1).dropna().sort_index()
+            band_max = combined.max(axis=1).dropna().sort_index()
+            fig.add_trace(go.Scatter(
+                x=list(band_max.index) + list(band_min.index[::-1]),
+                y=list(band_max.values) + list(band_min.values[::-1]),
+                fill="toself", fillcolor="rgba(180,180,180,0.25)",
+                line=dict(color="rgba(180,180,180,0)"),
+                name=f"{n_years}-yr range", hoverinfo="skip",
+            ))
+            fig.add_trace(go.Scatter(
+                x=avg.index, y=avg.values,
+                name=f"{n_years}-yr avg", mode="lines",
+                line=dict(color=INK_SECONDARY, dash="dashdot", width=2),
+            ))
+
+    for model in rdf["model_label"].unique():
+        mdf = rdf[rdf["model_label"] == model]
+        dash = "solid" if "Actual" in model else "dash"
+        label = "Current (Actual)" if "Actual" in model else "Current (Forecast)"
+        fig.add_trace(go.Scatter(
+            x=mdf["delivery_date"], y=mdf["cumulative_hdd"],
+            name=label, mode="lines",
+            line=dict(color=color, dash=dash, width=2.5),
+        ))
+    actual_sub = rdf[rdf["model_label"].str.contains("Actual", na=False)]
+    fcst_sub = rdf[~rdf["model_label"].str.contains("Actual", na=False)]
+    if not actual_sub.empty and not fcst_sub.empty:
+        la = actual_sub.sort_values("delivery_date").iloc[-1]
+        ff = fcst_sub.sort_values("delivery_date").iloc[0]
+        fig.add_trace(go.Scatter(
+            x=[la["delivery_date"], ff["delivery_date"]],
+            y=[la["cumulative_hdd"], ff["cumulative_hdd"]],
+            mode="lines", line=dict(color=color, dash="dash", width=2.5),
+            showlegend=False, hoverinfo="skip",
+        ))
     fig.update_yaxes(title_text="HDD (°C-days)")
     return fig
 

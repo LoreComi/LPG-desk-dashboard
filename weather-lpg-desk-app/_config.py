@@ -43,6 +43,7 @@ HIST_END_YEAR = 2025
 # gives a more meaningful "Nth coldest of last N years" than just 3 datapoints.
 HDD_OVERLAY_YEARS = 3
 HDD_RANK_POOL_YEARS = 10
+HDD_AVG_YEARS = 5              # years pooled for the "5-yr avg" reference line
 
 
 def hdd_season_start_year(dt) -> int:

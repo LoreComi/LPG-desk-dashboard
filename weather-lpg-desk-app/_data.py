@@ -254,6 +254,23 @@ def load_asia_hdd_season_history() -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_asia_hdd_run_comparison() -> pd.DataFrame:
+    """Daily HDD forecast — latest 3 model runs, by Asia region (population-weighted)."""
+    sql = f"""
+    SELECT model_label, run_ts, run_rank, run_label, region, delivery_date, daily_hdd
+    FROM {SBX_SCHEMA}.asia_hdd_run_comparison
+    WHERE snapshot_ts = (SELECT MAX(snapshot_ts) FROM {SBX_SCHEMA}.asia_hdd_run_comparison)
+    ORDER BY model_label, run_rank, region, delivery_date
+    """
+    df = run_query(sql)
+    df["daily_hdd"] = pd.to_numeric(df["daily_hdd"], errors="coerce")
+    df["delivery_date"] = pd.to_datetime(df["delivery_date"], errors="coerce")
+    df["run_ts"] = pd.to_datetime(df["run_ts"], errors="coerce", utc=True)
+    df["run_rank"] = pd.to_numeric(df["run_rank"], errors="coerce").astype("Int64")
+    return df
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3: INDIA PRECIPITATION ANOMALY
 # ══════════════════════════════════════════════════════════════════════════════

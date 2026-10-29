@@ -176,7 +176,7 @@ WITH padd_assign AS (
   SELECT DATE(delivery_start) AS dt, value AS temperature, {PADD_CASE} AS padd_region
   FROM dna_prod_silver.meteomatics.temperature
   WHERE curve_name = 't_mean_2m_24h_c_ecmwf_era5_p1d' AND model = 'ecmwf-era5'
-    AND delivery_start >= DATE_FORMAT(DATEADD(YEAR, -1, CURRENT_DATE()), 'yyyy-10-01')
+    AND delivery_start >= CASE WHEN MONTH(CURRENT_DATE()) >= 10 THEN DATE_FORMAT(CURRENT_DATE(), 'yyyy-10-01') ELSE DATE_FORMAT(DATEADD(YEAR, -1, CURRENT_DATE()), 'yyyy-10-01') END
     AND latitude BETWEEN 24 AND 50 AND longitude BETWEEN -125 AND -65
 ),
 actuals AS (
@@ -186,11 +186,33 @@ actuals AS (
   WHERE padd_region IS NOT NULL AND (DAYOFYEAR(dt) >= 274 OR DAYOFYEAR(dt) <= 90)
   GROUP BY padd_region, dt
 ),
+last_era5 AS (
+  SELECT COALESCE(MAX(delivery_date),
+    CASE WHEN MONTH(CURRENT_DATE()) >= 10 THEN CAST(DATE_FORMAT(CURRENT_DATE(), 'yyyy-09-30') AS DATE)
+         ELSE CAST(DATE_FORMAT(DATEADD(YEAR, -1, CURRENT_DATE()), 'yyyy-09-30') AS DATE) END
+  ) AS dt FROM actuals
+),
+gap_raw AS (
+  SELECT DATE(delivery_start) AS dt, value AS temperature, {PADD_CASE} AS padd_region,
+    ROW_NUMBER() OVER (PARTITION BY latitude, longitude, DATE(delivery_start) ORDER BY created_at DESC) AS rn
+  FROM dna_prod_silver.meteomatics.temperature_forecast
+  WHERE curve_name = 't_mean_2m_24h_c_ecmwf_ens_p1d' AND model = 'ecmwf-ens'
+    AND DATE(delivery_start) > (SELECT dt FROM last_era5)
+    AND DATE(delivery_start) < CURRENT_DATE()
+    AND (DAYOFYEAR(delivery_start) >= 274 OR DAYOFYEAR(delivery_start) <= 90)
+    AND latitude BETWEEN 24 AND 50 AND longitude BETWEEN -125 AND -65
+),
+gap_fill AS (
+  SELECT 'Actual (ERA5)' AS model_label, padd_region, dt AS delivery_date,
+    GREATEST(0, 18.0 - AVG(temperature)) AS daily_hdd
+  FROM gap_raw WHERE rn = 1 AND padd_region IS NOT NULL
+  GROUP BY padd_region, dt
+),
 fcst_assign AS (
   SELECT DATE(delivery_start) AS dt, value AS temperature, {PADD_CASE} AS padd_region
   FROM dna_prod_silver.meteomatics.temperature_forecast
   WHERE curve_name = 't_mean_2m_24h_c_ecmwf_ens_p1d' AND model = 'ecmwf-ens'
-    AND created_at = (SELECT MAX(created_at) FROM dna_prod_silver.meteomatics.temperature_forecast WHERE model = 'ecmwf-ens')
+    AND created_at = (SELECT MAX(created_at) FROM dna_prod_silver.meteomatics.temperature_forecast WHERE model = 'ecmwf-ens' AND curve_name = 't_mean_2m_24h_c_ecmwf_ens_p1d' AND latitude BETWEEN 24 AND 50 AND longitude BETWEEN -125 AND -65)
     AND latitude BETWEEN 24 AND 50 AND longitude BETWEEN -125 AND -65
 ),
 forecasts AS (
@@ -200,9 +222,9 @@ forecasts AS (
   WHERE padd_region IS NOT NULL AND (DAYOFYEAR(dt) >= 274 OR DAYOFYEAR(dt) <= 90)
   GROUP BY padd_region, dt
 ),
-combined AS (SELECT * FROM actuals UNION ALL SELECT * FROM forecasts)
+combined AS (SELECT * FROM actuals UNION ALL SELECT * FROM gap_fill UNION ALL SELECT * FROM forecasts)
 SELECT model_label, padd_region, delivery_date, daily_hdd,
-  SUM(daily_hdd) OVER (PARTITION BY model_label, padd_region ORDER BY delivery_date) AS cumulative_hdd
+  SUM(daily_hdd) OVER (PARTITION BY padd_region ORDER BY delivery_date) AS cumulative_hdd
 FROM combined ORDER BY padd_region, model_label, delivery_date
 """)
 print(f"hdd_season: {spark.sql('SELECT COUNT(*) FROM dna_snbx_weather.lpg_desk.hdd_season').first()[0]} rows")
@@ -273,6 +295,7 @@ WITH ranked_runs AS (
     DENSE_RANK() OVER (ORDER BY created_at DESC) AS run_rank
   FROM dna_prod_silver.meteomatics.temperature_forecast
   WHERE model = 'ecmwf-ens' AND curve_name = 't_mean_2m_24h_c_ecmwf_ens_p1d'
+    AND latitude BETWEEN 24 AND 50 AND longitude BETWEEN -125 AND -65
 ),
 top3 AS (SELECT created_at, run_rank FROM ranked_runs WHERE run_rank <= 3),
 daily AS (
@@ -313,16 +336,35 @@ city_actuals AS (
   SELECT {ASIA_CITY_CASE} AS city, DATE(delivery_start) AS dt, AVG(value) AS temperature
   FROM dna_prod_silver.meteomatics.temperature
   WHERE curve_name = 't_mean_2m_24h_c_ecmwf_era5_p1d' AND model = 'ecmwf-era5'
-    AND delivery_start >= DATE_FORMAT(DATEADD(YEAR, -1, CURRENT_DATE()), 'yyyy-10-01')
+    AND delivery_start >= CASE WHEN MONTH(CURRENT_DATE()) >= 10 THEN DATE_FORMAT(CURRENT_DATE(), 'yyyy-10-01') ELSE DATE_FORMAT(DATEADD(YEAR, -1, CURRENT_DATE()), 'yyyy-10-01') END
     AND (DAYOFYEAR(delivery_start) >= 274 OR DAYOFYEAR(delivery_start) <= 90)
     AND ({ASIA_COORD_FILTER})
   GROUP BY {ASIA_CITY_CASE}, DATE(delivery_start)
+),
+last_era5_asia AS (
+  SELECT COALESCE(MAX(dt),
+    CASE WHEN MONTH(CURRENT_DATE()) >= 10 THEN CAST(DATE_FORMAT(CURRENT_DATE(), 'yyyy-09-30') AS DATE)
+         ELSE CAST(DATE_FORMAT(DATEADD(YEAR, -1, CURRENT_DATE()), 'yyyy-09-30') AS DATE) END
+  ) AS dt FROM city_actuals
+),
+city_gap_raw AS (
+  SELECT {ASIA_CITY_CASE} AS city, DATE(delivery_start) AS dt, value AS temperature,
+    ROW_NUMBER() OVER (PARTITION BY latitude, longitude, DATE(delivery_start) ORDER BY created_at DESC) AS rn
+  FROM dna_prod_silver.meteomatics.temperature_forecast
+  WHERE curve_name = 't_mean_2m_24h_c_ecmwf_ens_p1d' AND model = 'ecmwf-ens'
+    AND DATE(delivery_start) > (SELECT dt FROM last_era5_asia)
+    AND DATE(delivery_start) < CURRENT_DATE()
+    AND (DAYOFYEAR(delivery_start) >= 274 OR DAYOFYEAR(delivery_start) <= 90)
+    AND ({ASIA_COORD_FILTER})
+),
+city_gap AS (
+  SELECT city, dt, AVG(temperature) AS temperature FROM city_gap_raw WHERE rn = 1 AND city IS NOT NULL GROUP BY city, dt
 ),
 city_forecast AS (
   SELECT {ASIA_CITY_CASE} AS city, DATE(delivery_start) AS dt, AVG(value) AS temperature
   FROM dna_prod_silver.meteomatics.temperature_forecast
   WHERE curve_name = 't_mean_2m_24h_c_ecmwf_ens_p1d' AND model = 'ecmwf-ens'
-    AND created_at = (SELECT MAX(created_at) FROM dna_prod_silver.meteomatics.temperature_forecast WHERE model = 'ecmwf-ens')
+    AND created_at = (SELECT MAX(created_at) FROM dna_prod_silver.meteomatics.temperature_forecast WHERE model = 'ecmwf-ens' AND curve_name = 't_mean_2m_24h_c_ecmwf_ens_p1d' AND ({ASIA_COORD_FILTER}))
     AND (DAYOFYEAR(delivery_start) >= 274 OR DAYOFYEAR(delivery_start) <= 90)
     AND ({ASIA_COORD_FILTER})
   GROUP BY {ASIA_CITY_CASE}, DATE(delivery_start)
@@ -331,6 +373,10 @@ weighted AS (
   SELECT 'Actual (ERA5)' AS model_label, w.region, a.dt AS delivery_date,
     GREATEST(0, 18.0 - a.temperature) * w.population AS weighted_hdd, w.population
   FROM city_actuals a JOIN weights w ON a.city = w.city
+  UNION ALL
+  SELECT 'Actual (ERA5)' AS model_label, w.region, g.dt AS delivery_date,
+    GREATEST(0, 18.0 - g.temperature) * w.population AS weighted_hdd, w.population
+  FROM city_gap g JOIN weights w ON g.city = w.city
   UNION ALL
   SELECT 'EC-ens (14d)' AS model_label, w.region, f.dt AS delivery_date,
     GREATEST(0, 18.0 - f.temperature) * w.population AS weighted_hdd, w.population
@@ -342,7 +388,7 @@ region_daily AS (
   FROM weighted GROUP BY model_label, region, delivery_date
 )
 SELECT region, model_label, delivery_date, daily_hdd,
-  SUM(daily_hdd) OVER (PARTITION BY region, model_label ORDER BY delivery_date) AS cumulative_hdd
+  SUM(daily_hdd) OVER (PARTITION BY region ORDER BY delivery_date) AS cumulative_hdd
 FROM region_daily ORDER BY region, model_label, delivery_date
 """)
 print(f"asia_hdd_season: {spark.sql('SELECT COUNT(*) FROM dna_snbx_weather.lpg_desk.asia_hdd_season').first()[0]} rows")
@@ -421,6 +467,55 @@ WHERE season_start_year < (SELECT yr FROM current_season)
 ORDER BY region, season_start_year, dt
 """)
 print(f"asia_hdd_season_history: {spark.sql('SELECT COUNT(*) FROM dna_snbx_weather.lpg_desk.asia_hdd_season_history').first()[0]} rows")
+
+# COMMAND ----------
+
+# DBTITLE 1,3c. Asia HDD run comparison (latest 3 model runs, population-weighted)
+spark.sql(f"""
+CREATE OR REPLACE TABLE dna_snbx_weather.lpg_desk.asia_hdd_run_comparison
+TBLPROPERTIES('delta.feature.allowColumnDefaults' = 'supported')
+AS
+WITH weights AS (
+  SELECT * FROM VALUES
+  {asia_weights_values}
+  AS t(city, region, population)
+),
+ranked_runs AS (
+  SELECT DISTINCT created_at,
+    DENSE_RANK() OVER (ORDER BY created_at DESC) AS run_rank
+  FROM dna_prod_silver.meteomatics.temperature_forecast
+  WHERE model = 'ecmwf-ens' AND curve_name = 't_mean_2m_24h_c_ecmwf_ens_p1d'
+    AND ({ASIA_COORD_FILTER})
+),
+top3 AS (SELECT created_at, run_rank FROM ranked_runs WHERE run_rank <= 3),
+city_daily AS (
+  SELECT t.created_at AS run_ts, r.run_rank,
+    {ASIA_CITY_CASE} AS city, DATE(t.delivery_start) AS delivery_date,
+    AVG(t.value) AS temperature
+  FROM dna_prod_silver.meteomatics.temperature_forecast t
+  JOIN top3 r ON t.created_at = r.created_at
+  WHERE t.model = 'ecmwf-ens' AND t.curve_name = 't_mean_2m_24h_c_ecmwf_ens_p1d'
+    AND ({ASIA_COORD_FILTER})
+  GROUP BY t.created_at, r.run_rank, {ASIA_CITY_CASE}, DATE(t.delivery_start)
+),
+weighted AS (
+  SELECT c.run_ts, c.run_rank, w.region, c.delivery_date,
+    GREATEST(0, 18.0 - c.temperature) * w.population AS weighted_hdd,
+    w.population
+  FROM city_daily c JOIN weights w ON c.city = w.city
+),
+region_daily AS (
+  SELECT run_ts, run_rank, region, delivery_date,
+    SUM(weighted_hdd) / SUM(population) AS daily_hdd
+  FROM weighted GROUP BY run_ts, run_rank, region, delivery_date
+)
+SELECT 'EC-ens' AS model_label, run_ts, run_rank,
+  CASE run_rank WHEN 1 THEN 'Latest' WHEN 2 THEN '-12h' ELSE '-24h' END AS run_label,
+  region, delivery_date, daily_hdd, CURRENT_TIMESTAMP() AS snapshot_ts
+FROM region_daily
+ORDER BY run_rank, region, delivery_date
+""")
+print(f"asia_hdd_run_comparison: {spark.sql('SELECT COUNT(*) FROM dna_snbx_weather.lpg_desk.asia_hdd_run_comparison').first()[0]} rows")
 
 # COMMAND ----------
 
@@ -617,7 +712,7 @@ print(f"LPG Desk Sandbox Refresh COMPLETE: {datetime.now()}")
 print(f"{'='*60}")
 
 tables = ["hdd_season", "hdd_normal", "hdd_run_comparison", "hdd_season_history",
-          "asia_hdd_season", "asia_hdd_normal", "asia_hdd_season_history",
+          "asia_hdd_season", "asia_hdd_normal", "asia_hdd_season_history", "asia_hdd_run_comparison",
           "india_precip_anomaly", "panama_precip_anomaly",
           "padd3_coastal_temps", "nafrica_wind"]
 for t in tables:
