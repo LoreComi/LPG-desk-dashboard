@@ -186,12 +186,24 @@ def gas_weighted_us(df: pd.DataFrame, value_cols: list[str], keys: list[str],
 
 def build_weighted_us_frames(season_df, normal_df, history_df, run_df) -> dict[str, pd.DataFrame]:
     """Gas-weighted US versions of the four US HDD frames, keyed like the inputs."""
+    # Cumulatives are rebuilt as a running sum of the weighted *daily* values,
+    # not by weighting each PADD's cumulative: the weights change mid-season
+    # (winter/summer set), and a weighted cumulative would jump at the switch
+    # and stop matching the cumulative of the weighted normal.
+    season = gas_weighted_us(season_df, ["daily_hdd"], ["model_label", "delivery_date"])
+    season = season.sort_values("delivery_date", kind="stable").reset_index(drop=True)
+    season["cumulative_hdd"] = season["daily_hdd"].fillna(0.0).cumsum()
+
+    history = gas_weighted_us(history_df, ["daily_hdd"],
+                              ["season_start_year", "season_label", "day_of_year", "delivery_date"])
+    history = history.sort_values(["season_start_year", "delivery_date"], kind="stable").reset_index(drop=True)
+    history["cumulative_hdd"] = history.groupby("season_start_year")["daily_hdd"].transform(
+        lambda s: s.fillna(0.0).cumsum())
+
     return {
-        "season": gas_weighted_us(season_df, ["daily_hdd", "cumulative_hdd"],
-                                  ["model_label", "delivery_date"]),
+        "season": season,
         "normal": gas_weighted_us(normal_df, ["daily_hdd_normal"], ["day_of_year"]),
-        "history": gas_weighted_us(history_df, ["daily_hdd", "cumulative_hdd"],
-                                   ["season_start_year", "season_label", "day_of_year", "delivery_date"]),
+        "history": history,
         "run": gas_weighted_us(run_df, ["daily_hdd"],
                                ["model_label", "run_ts", "run_rank", "run_label", "delivery_date"]),
     }

@@ -108,31 +108,30 @@ PADD_REGIONS: dict[str, dict] = {
 
 PADD_COLORS: dict[str, str] = dict(zip(PADD_REGIONS.keys(), CATEGORICAL))
 
-# ─── L48 gas-demand weights (PLACEHOLDER — replace with the desk's numbers) ───
+# ─── L48 gas-demand weights (desk-supplied) ────────────────────────────────────
 # Used to collapse the five PADD HDD series into one "US (gas-weighted)" series.
 # Each season's weights must sum to 1.0 (they are re-normalised over whichever
 # PADDs actually have data, so a missing PADD can't drag the total down).
-# These are an initial guess, NOT desk-supplied: heating-load weights lean
-# Midwest/Northeast in winter; power-burn pushes weight to the South in summer.
+# Winter = heating demand; summer = cooling demand (power burn, South-heavy).
 GAS_DEMAND_WEIGHTS: dict[str, dict[str, float]] = {
     "winter": {
-        "PADD 1 - Northeast":     0.27,
-        "PADD 2 - Midwest":       0.38,
-        "PADD 3 - South Central": 0.18,
-        "PADD 4 - Mountain":      0.06,
-        "PADD 5 - West":          0.11,
+        "PADD 1 - Northeast":     0.45,
+        "PADD 2 - Midwest":       0.20,
+        "PADD 3 - South Central": 0.25,
+        "PADD 4 - Mountain":      0.05,
+        "PADD 5 - West":          0.05,
     },
     "summer": {
-        "PADD 1 - Northeast":     0.18,
-        "PADD 2 - Midwest":       0.22,
-        "PADD 3 - South Central": 0.38,
+        "PADD 1 - Northeast":     0.15,
+        "PADD 2 - Midwest":       0.15,
+        "PADD 3 - South Central": 0.60,
         "PADD 4 - Mountain":      0.05,
-        "PADD 5 - West":          0.17,
+        "PADD 5 - West":          0.05,
     },
 }
-# Months that use each weight set. The HDD season is Oct-Mar, so the summer set
-# only matters if HDD data ever extends outside it.
-GAS_WINTER_MONTHS = {10, 11, 12, 1, 2, 3}
+# Months that use the winter set; every other month uses the summer set. Note
+# the HDD season starts Oct 1, so October HDD rows fall on the summer weights.
+GAS_WINTER_MONTHS = {11, 12, 1, 2, 3}
 US_WEIGHTED_LABEL = "US L48 (gas-weighted)"
 
 

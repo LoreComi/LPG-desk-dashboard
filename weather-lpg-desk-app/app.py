@@ -105,7 +105,7 @@ def status_banner(text: str, level: str = "warning") -> str:
     return f'<div class="status-banner status-banner-{level}"><span class="status-tag">{tag}</span>{text}</div>'
 
 
-def forecast_kpi_card(label: str, fcst_hdd, avg_hdd) -> str:
+def forecast_kpi_card(label: str, fcst_hdd, avg_hdd, small: bool = False) -> str:
     """14-day forecast KPI card — styled identically to the season KPI cards."""
     if fcst_hdd is None:
         return raw_kpi_card(label, "N/A", "kpi-card-neutral")
@@ -118,7 +118,8 @@ def forecast_kpi_card(label: str, fcst_hdd, avg_hdd) -> str:
     arrow = "\u25b2" if delta > 0 else ("\u25bc" if delta < 0 else "\u25cf")
     word = "colder" if delta > 0 else ("milder" if delta < 0 else "on avg")
     delta_html = f'<div class="kpi-delta {d_cls}">{arrow} {abs(delta):.0f} {word} vs {avg_hdd:.0f} (10-yr avg)</div>'
-    return (f'<div class="kpi-card {card_class}"><div class="kpi-label">{label}</div>'
+    size_class = " kpi-card-sm" if small else ""
+    return (f'<div class="kpi-card {card_class}{size_class}"><div class="kpi-label">{label}</div>'
             f'<div class="kpi-value">{value_str}</div>{delta_html}</div>')
 
 
@@ -149,7 +150,7 @@ def _ordinal(n: int) -> str:
     return f"{n}{suffix}"
 
 
-def hdd_kpi_card(label: str, kpis: dict | None) -> str:
+def hdd_kpi_card(label: str, kpis: dict | None, small: bool = False) -> str:
     """Season-to-date HDD KPI card — cumulative, vs-normal delta, coldest/warmest rank.
 
     An HDD delta's sign is the opposite of a raw temperature anomaly: MORE
@@ -184,46 +185,29 @@ def hdd_kpi_card(label: str, kpis: dict | None) -> str:
             mild_rank = total - rank + 1
             rank_html = f'<div class="kpi-rank">{_ordinal(mild_rank)} mildest of last {pool} yrs</div>'
 
-    return (f'<div class="kpi-card {card_class}"><div class="kpi-label">{label}</div>'
+    size_class = " kpi-card-sm" if small else ""
+    return (f'<div class="kpi-card {card_class}{size_class}"><div class="kpi-label">{label}</div>'
             f'<div class="kpi-value">{value_str}</div>{delta_html}{rank_html}</div>')
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1: US HDD BY PADD
 # ══════════════════════════════════════════════════════════════════════════════
-def us_hdd_card(label: str, kpis: dict | None, fcst_hdd, avg_hdd, small: bool = False) -> str:
-    """US HDD box: 14-day forecast HDD vs 10-yr avg, with season-to-date
-    (vs normal) underneath. Used full-size for the gas-weighted L48 headline
-    and `small` for the per-PADD boxes under it."""
-    if fcst_hdd is None and kpis is None:
-        return raw_kpi_card(label, "N/A", "kpi-card-neutral")
-
-    value_str = f"{fcst_hdd:.0f} HDD" if fcst_hdd is not None else "N/A"
-    card_class, delta_html = "kpi-card-neutral", ""
-    if fcst_hdd is not None and avg_hdd is not None:
-        delta = fcst_hdd - avg_hdd
-        card_class = "kpi-card-cool" if delta > 0 else ("kpi-card-warm" if delta < 0 else "kpi-card-neutral")
-        d_cls = "kpi-delta-up" if delta > 0 else ("kpi-delta-down" if delta < 0 else "kpi-delta-flat")
-        arrow = "▲" if delta > 0 else ("▼" if delta < 0 else "●")
-        word = "colder" if delta > 0 else ("milder" if delta < 0 else "on avg")
-        delta_html = (f'<div class="kpi-delta {d_cls}">{arrow} {abs(delta):.0f} {word} '
-                      f'vs {avg_hdd:.0f} (10-yr avg) · next 14 days</div>')
-
-    season_html = ""
-    if kpis is not None:
-        season_html = f'<div class="kpi-rank">Season to date: {kpis["cumulative_to_date"]:.0f} HDD'
-        sdelta = kpis.get("delta_vs_normal")
-        if sdelta is not None and not np.isnan(sdelta):
-            season_html += f' · {sdelta:+.0f} vs normal'
-        season_html += '</div>'
-
-    size_class = " kpi-card-sm" if small else ""
-    return (f'<div class="kpi-card {card_class}{size_class}"><div class="kpi-label">{label}</div>'
-            f'<div class="kpi-value">{value_str}</div>{delta_html}{season_html}</div>')
+def _off_season_banner(as_of) -> None:
+    """Warn that the numbers below are last winter's final values."""
+    if is_in_hdd_season():
+        return
+    label = hdd_season_label(hdd_season_start_year(as_of)) if as_of is not None else "last winter"
+    st.markdown(
+        status_banner(f"Not in HDD seasonality — showing final values for {label} below.", "warning"),
+        unsafe_allow_html=True,
+    )
 
 
-def render_us_hdd():
-    st.markdown("#### US HEATING DEGREE DAYS")
+def render_us_hdd(view: str = "Forecast"):
+    """US HDD page. view: 'Forecast' (14-day vs 10-yr avg + run comparison)
+    or 'Season so far' (cumulative-to-date vs normal + season charts)."""
+    st.markdown(f"#### US HEATING DEGREE DAYS — {view.upper()}")
     st.caption(f"Base {HDD_BASE_TEMP:.0f}°C. Season Oct 1 – Mar 31. Source: ERA5 + EC-ens forecast.")
 
     try:
@@ -239,20 +223,17 @@ def render_us_hdd():
     us = build_weighted_us_frames(season_df, normal_df, history_df, run_df)
     us_kpis = compute_season_kpis(us["season"], us["normal"], us["history"],
                                   "padd_region", US_WEIGHTED_LABEL)
-    us_fhdd, us_ahdd = _forecast_vs_10yr(us["season"], us["history"], "padd_region", US_WEIGHTED_LABEL)
+    _off_season_banner(us_kpis["as_of"] if us_kpis else None)
 
-    if not is_in_hdd_season():
-        as_of = us_kpis["as_of"] if us_kpis else None
-        label = hdd_season_label(hdd_season_start_year(as_of)) if as_of is not None else "last winter"
-        st.markdown(
-            status_banner(f"Not in HDD seasonality — showing final values for {label} below.", "warning"),
-            unsafe_allow_html=True,
-        )
-
+    # Headline L48 box, then the PADDs smaller underneath.
     _, box_col, _ = st.columns([1, 2, 1])
     with box_col:
-        st.markdown(us_hdd_card(f"{US_WEIGHTED_LABEL} HDD", us_kpis, us_fhdd, us_ahdd),
-                    unsafe_allow_html=True)
+        if view == "Forecast":
+            fhdd, ahdd = _forecast_vs_10yr(us["season"], us["history"], "padd_region", US_WEIGHTED_LABEL)
+            card = forecast_kpi_card(f"{US_WEIGHTED_LABEL} · 14-day", fhdd, ahdd)
+        else:
+            card = hdd_kpi_card(f"{US_WEIGHTED_LABEL} · season so far", us_kpis)
+        st.markdown(card, unsafe_allow_html=True)
     weight_set = gas_weight_season(us_kpis["as_of"].month) if us_kpis else "winter"
     st.caption(
         f"Gas-demand weighted ({weight_set} weights): "
@@ -268,47 +249,58 @@ def render_us_hdd():
     else:
         padd_cols = st.columns(len(selected_padds))
         for i, padd in enumerate(selected_padds):
-            kpis = compute_season_kpis(season_df, normal_df, history_df, "padd_region", padd)
-            fhdd, ahdd = _forecast_vs_10yr(season_df, history_df, "padd_region", padd)
             with padd_cols[i]:
-                st.markdown(us_hdd_card(padd, kpis, fhdd, ahdd, small=True), unsafe_allow_html=True)
+                if view == "Forecast":
+                    fhdd, ahdd = _forecast_vs_10yr(season_df, history_df, "padd_region", padd)
+                    card = forecast_kpi_card(padd, fhdd, ahdd, small=True)
+                else:
+                    kpis = compute_season_kpis(season_df, normal_df, history_df, "padd_region", padd)
+                    card = hdd_kpi_card(padd, kpis, small=True)
+                st.markdown(card, unsafe_allow_html=True)
 
     st.divider()
 
-    if selected_padds:
-        cols = st.columns(min(len(selected_padds), 3))
-        for i, padd in enumerate(selected_padds):
-            with cols[i % len(cols)]:
-                fig = make_hdd_season_chart(season_df, padd, normal_df, history_df)
-                st.plotly_chart(fig, use_container_width=True)
-
-    if not run_df.empty:
-        st.divider()
+    names = [US_WEIGHTED_LABEL] + selected_padds
+    if view == "Forecast":
+        if run_df.empty:
+            st.info("No model-run data available.")
+            return
         st.markdown("##### Run Comparison — 5-day window totals (latest 3 model runs)")
         st.caption(
             "Each box: total HDD per window for each run (darkest = latest), with the run-over-run "
             "change underneath (+ = newer run colder). Only dates covered by all 3 runs are summed, "
             "so runs compare like-for-like."
         )
-        names = [US_WEIGHTED_LABEL] + selected_padds
-        cols2 = st.columns(min(len(names), 3))
+        cols = st.columns(min(len(names), 3))
         for i, name in enumerate(names):
             totals = run_window_totals(us["run"] if name == US_WEIGHTED_LABEL else run_df, name)
             if totals.empty:
                 continue
-            with cols2[i % len(cols2)]:
+            with cols[i % len(cols)]:
                 with st.container(border=True):
                     st.markdown(f"**{name}**")
                     st.plotly_chart(make_hdd_run_totals_chart(totals, name), use_container_width=True)
                     st.plotly_chart(make_hdd_run_change_chart(run_over_run_change(totals), name),
                                     use_container_width=True)
+    else:
+        st.markdown("##### Cumulative Season HDD")
+        cols = st.columns(min(len(names), 3))
+        for i, name in enumerate(names):
+            with cols[i % len(cols)]:
+                if name == US_WEIGHTED_LABEL:
+                    fig = make_hdd_season_chart(us["season"], name, us["normal"], us["history"])
+                else:
+                    fig = make_hdd_season_chart(season_df, name, normal_df, history_df)
+                st.plotly_chart(fig, use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2: ASIA HDD
 # ══════════════════════════════════════════════════════════════════════════════
-def render_asia_hdd():
-    st.markdown("#### ASIA HEATING DEGREE DAYS")
+def render_asia_hdd(view: str = "Forecast"):
+    """Asia HDD page. view: 'Forecast' (14-day vs 10-yr avg + run comparison)
+    or 'Season so far' (cumulative-to-date vs normal + season charts)."""
+    st.markdown(f"#### ASIA HEATING DEGREE DAYS — {view.upper()}")
     st.caption("Population-weighted HDD. Japan, South Korea, China North/East/South.")
 
     try:
@@ -330,46 +322,35 @@ def render_asia_hdd():
 
     region_kpis = {region: compute_season_kpis(season_df, normal_df, history_df, "region", region)
                    for region in selected}
+    _off_season_banner(next((k["as_of"] for k in region_kpis.values() if k), None))
 
-    if not is_in_hdd_season():
-        as_of = next((k["as_of"] for k in region_kpis.values() if k), None)
-        label = hdd_season_label(hdd_season_start_year(as_of)) if as_of is not None else "last winter"
-        st.markdown(
-            status_banner(f"Not in HDD seasonality — showing final values for {label} below.", "warning"),
-            unsafe_allow_html=True,
-        )
-
-    st.markdown("##### Season")
     kpi_cols = st.columns(len(selected))
     for i, region in enumerate(selected):
         with kpi_cols[i % len(kpi_cols)]:
-            st.markdown(hdd_kpi_card(region, region_kpis[region]), unsafe_allow_html=True)
-
-    st.markdown("##### Forecast (14-day)")
-    fcst_cols = st.columns(len(selected))
-    for i, region in enumerate(selected):
-        with fcst_cols[i % len(fcst_cols)]:
-            fhdd, ahdd = _forecast_vs_10yr(season_df, history_df, "region", region)
-            st.markdown(forecast_kpi_card(region, fhdd, ahdd), unsafe_allow_html=True)
+            if view == "Forecast":
+                fhdd, ahdd = _forecast_vs_10yr(season_df, history_df, "region", region)
+                st.markdown(forecast_kpi_card(region, fhdd, ahdd), unsafe_allow_html=True)
+            else:
+                st.markdown(hdd_kpi_card(region, region_kpis[region]), unsafe_allow_html=True)
 
     st.divider()
 
-    # Per-region cumulative HDD charts (mirrors US PADD layout)
-    cols = st.columns(min(len(selected), 3))
-    for i, region in enumerate(selected):
-        with cols[i % len(cols)]:
-            fig = make_asia_hdd_region_chart(season_df, region, normal_df, history_df)
-            st.plotly_chart(fig, use_container_width=True)
-
-    # Run comparison (latest 3 model runs) — per region
-    if not run_df.empty:
-        st.divider()
+    if view == "Forecast":
+        if run_df.empty:
+            st.info("No model-run data available.")
+            return
         st.markdown("##### Run Comparison (latest 3 model runs)")
-        cols2 = st.columns(min(len(selected), 3))
+        cols = st.columns(min(len(selected), 3))
         for i, region in enumerate(selected):
-            with cols2[i % len(cols2)]:
-                fig = make_asia_hdd_comparison_chart(run_df, region)
-                st.plotly_chart(fig, use_container_width=True)
+            with cols[i % len(cols)]:
+                st.plotly_chart(make_asia_hdd_comparison_chart(run_df, region), use_container_width=True)
+    else:
+        st.markdown("##### Cumulative Season HDD")
+        cols = st.columns(min(len(selected), 3))
+        for i, region in enumerate(selected):
+            with cols[i % len(cols)]:
+                st.plotly_chart(make_asia_hdd_region_chart(season_df, region, normal_df, history_df),
+                                use_container_width=True)
 
 
 
@@ -1173,10 +1154,34 @@ PAGES = {
     "N. Africa Wind": render_nafrica_wind,
 }
 
+# Sections that open a sub-menu under their sidebar entry when selected.
+SUBPAGES = {
+    "US HDD": ["Forecast", "Season so far"],
+    "Asia HDD": ["Forecast", "Season so far"],
+}
+
+# One radio holds both levels: the active section's sub-items are spliced in
+# right under it. Its key carries a generation counter, because radio state is
+# stored by option *index* — a changed option list (or a click that needs
+# normalising, see below) must start a fresh widget rather than reuse stale state.
+nav_parent = st.session_state.get("nav_parent", "US HDD")
+nav_sub = st.session_state.get("nav_sub", SUBPAGES.get(nav_parent, [None])[0])
+nav_gen = st.session_state.get("nav_gen", 0)
+nav_options = []
+for _page in PAGES:
+    nav_options.append((_page, None))
+    if _page == nav_parent:
+        nav_options += [(_page, _s) for _s in SUBPAGES.get(_page, [])]
+_current = (nav_parent, nav_sub) if nav_parent in SUBPAGES else (nav_parent, None)
+if _current not in nav_options:
+    _current = nav_options[0]
+
 with st.sidebar:
     st.markdown("### Sections")
-    selected_page = st.radio(
-        "Sections", list(PAGES.keys()), label_visibility="collapsed", key="nav_page",
+    nav_choice = st.radio(
+        "Sections", nav_options, index=nav_options.index(_current),
+        format_func=lambda o: o[0] if o[1] is None else f" ↳ {o[1]}",
+        label_visibility="collapsed", key=f"nav_{nav_gen}",
     )
     st.divider()
     # A separate, distinct action (not a section to browse) — one click both
@@ -1184,6 +1189,18 @@ with st.sidebar:
     generate_clicked = st.button(
         "Generate AI Brief", type="primary", use_container_width=True, key="ai_brief_sidebar_btn",
     )
+
+new_parent, new_sub = nav_choice
+if new_parent != nav_parent or (new_sub is None and new_parent in SUBPAGES):
+    # Moved to another section, or clicked the already-open section's own row:
+    # land on its first sub-view (or keep the current one) and redraw the menu.
+    st.session_state["nav_parent"] = new_parent
+    st.session_state["nav_sub"] = (nav_sub if new_parent == nav_parent
+                                   else SUBPAGES.get(new_parent, [None])[0])
+    st.session_state["nav_gen"] = nav_gen + 1
+    st.rerun()
+st.session_state["nav_sub"] = new_sub if new_parent in SUBPAGES else None
+selected_page = new_parent
 
 if generate_clicked:
     st.session_state["show_ai_brief"] = True
@@ -1193,5 +1210,7 @@ st.session_state["_last_nav_page"] = selected_page
 
 if st.session_state.get("show_ai_brief"):
     render_lpg_brief(auto_generate=generate_clicked)
+elif selected_page in SUBPAGES:
+    PAGES[selected_page](st.session_state["nav_sub"])
 else:
     PAGES[selected_page]()
